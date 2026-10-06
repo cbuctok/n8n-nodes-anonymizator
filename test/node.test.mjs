@@ -135,7 +135,7 @@ function installFakeAnalyze() {
 		analyzeCalls.push({ ctx, text, entityTypes, options });
 		if (analyzeBehaviour.throw) throw analyzeBehaviour.throw;
 		return {
-			spans: detect(text, entityTypes),
+			spans: analyzeBehaviour.spans ? analyzeBehaviour.spans(text) : detect(text, entityTypes),
 			entityFilterIgnored: analyzeBehaviour.entityFilterIgnored === true,
 		};
 	};
@@ -161,12 +161,12 @@ function keyFor(map, value) {
 describe('node description', () => {
 	const { description } = new Anonymizator();
 
-	test('credential is required for Protect only', () => {
+	test('credential is required for Protect and Detect only', () => {
 		assert.deepEqual(description.credentials, [
 			{
 				name: 'anonymizatorApi',
 				required: true,
-				displayOptions: { show: { operation: ['protect'] } },
+				displayOptions: { show: { operation: ['protect', 'detect'] } },
 			},
 		]);
 		assert.equal(description.usableAsTool, true);
@@ -184,16 +184,81 @@ describe('node description', () => {
 		assert.deepEqual(prop.displayOptions.show.detect, ['selected']);
 	});
 
-	test('protect options are alphabetical and default off', () => {
-		const prop = description.properties.find(
-			(p) => p.name === 'options' && p.displayOptions.show.operation[0] === 'protect',
+	const optionsFor = (operation) =>
+		description.properties.find(
+			(p) => p.name === 'options' && p.displayOptions.show.operation[0] === operation,
 		);
+
+	test('protect options are alphabetical; only Include Placeholder Map defaults on', () => {
+		const prop = optionsFor('protect');
 		assert.deepEqual(
 			prop.options.map((o) => o.name),
-			['existingPlaceholderMap', 'includeIdFile', 'includeInputFields', 'shareMapAcrossItems'],
+			[
+				'existingPlaceholderMap',
+				'ignoreTerms',
+				'includeIdFile',
+				'includeInputFields',
+				'includePlaceholderMap',
+				'shareMapAcrossItems',
+			],
+		);
+		assert.deepEqual(
+			prop.options.map((o) => o.displayName),
+			[...prop.options.map((o) => o.displayName)].sort(),
+		);
+		for (const o of prop.options.filter((x) => x.type === 'boolean')) {
+			assert.equal(o.default, o.name === 'includePlaceholderMap', o.name);
+		}
+		const existing = prop.options.find((o) => o.name === 'existingPlaceholderMap');
+		assert.match(existing.placeholder, /^e\.g\. /);
+	});
+
+	test('detect options are alphabetical and default off', () => {
+		const prop = optionsFor('detect');
+		assert.deepEqual(
+			prop.options.map((o) => o.name),
+			['ignoreTerms', 'includeInputFields', 'includeValues'],
 		);
 		for (const o of prop.options.filter((x) => x.type === 'boolean'))
 			assert.equal(o.default, false);
+	});
+
+	test('operations: Detect, Protect, Reveal; Protect stays the default', () => {
+		const op = description.properties.find((p) => p.name === 'operation');
+		assert.deepEqual(
+			op.options.map((o) => [o.value, o.action]),
+			[
+				['detect', 'Detect personal data'],
+				['protect', 'Protect text'],
+				['reveal', 'Reveal text'],
+			],
+		);
+		assert.equal(op.default, 'protect');
+	});
+
+	test('Detect shares Detect and Entity Types with Protect', () => {
+		for (const name of ['detect', 'entityTypes']) {
+			const prop = description.properties.find((p) => p.name === name);
+			assert.deepEqual(prop.displayOptions.show.operation, ['protect', 'detect'], name);
+		}
+	});
+
+	test('Reveal warns about agents and hints at the usual expressions without prefilling them', () => {
+		const notice = description.properties.find((p) => p.name === 'revealNotice');
+		assert.equal(notice.type, 'notice');
+		assert.deepEqual(notice.displayOptions.show.operation, ['reveal']);
+		assert.match(notice.displayName, /real values/);
+		assert.match(notice.displayName, /agent/);
+		const reveal = (name) =>
+			description.properties.find(
+				(p) => p.name === name && p.displayOptions?.show?.operation?.[0] === 'reveal',
+			);
+		assert.equal(reveal('text').default, '');
+		assert.match(reveal('text').hint, /\{\{ \$json\.text \}\}/);
+		assert.match(reveal('text').hint, /\{\{ \$json\.output \}\}/);
+		assert.equal(reveal('placeholderMap').default, '{}');
+		assert.match(reveal('placeholderMap').hint, /\$\('Protect'\)\.item\.json\.placeholderMap/);
+		assert.match(reveal('placeholderMap').hint, /your Protect node's name/);
 	});
 });
 
@@ -554,6 +619,245 @@ describe('Protect (fake analyze)', () => {
 		const error = await runError({ params: protectParams({ text: { a: 1 } }) });
 		assert.ok(error instanceof NodeOperationError);
 		assert.match(error.message, /must be text/);
+	});
+});
+
+describe('Include Placeholder Map (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	test('on by default: the map is in the output', async () => {
+		const [item] = await run({ params: protectParams({ options: {} }) });
+		assert.ok(keyFor(item.json.placeholderMap, 'Janez Novak'));
+	});
+
+	test('off: no placeholderMap, protected text and entities unchanged in shape', async () => {
+		const [item] = await run({
+			params: protectParams({ options: { includePlaceholderMap: false } }),
+		});
+		assert.ok(!('placeholderMap' in item.json));
+		assert.ok(!('idFile' in item.json));
+		assert.match(item.json.protectedText, /^\[PERSON_[a-z0-9]{5}\] wrote from \[EMAIL_ADDRESS_/);
+		assert.equal(item.json.entities.length, 3);
+		for (const value of ['Janez', 'ana.kovac', 'SI56']) {
+			assert.ok(!JSON.stringify(item.json).includes(value), `${value} must not be in the output`);
+		}
+	});
+
+	test('off, masked style: no empty map either', async () => {
+		const [item] = await run({
+			params: protectParams({
+				placeholderStyle: 'typed',
+				options: { includePlaceholderMap: false },
+			}),
+		});
+		assert.deepEqual(Object.keys(item.json).sort(), ['entities', 'protectedText']);
+	});
+
+	test('off with Include Input Fields: a copied placeholderMap or idFile is removed too', async () => {
+		const [item] = await run({
+			items: [{ body: 'x', placeholderMap: { PERSON_1: 'Janez Novak' }, idFile: { ids: [] } }],
+			params: protectParams({
+				options: { includePlaceholderMap: false, includeInputFields: true },
+			}),
+		});
+		assert.equal(item.json.body, 'x');
+		assert.ok(!('placeholderMap' in item.json));
+		assert.ok(!('idFile' in item.json));
+	});
+
+	test('off together with Include ID File is refused before anything is sent', async () => {
+		const error = await runError({
+			params: protectParams({ options: { includePlaceholderMap: false, includeIdFile: true } }),
+		});
+		assert.ok(error instanceof NodeOperationError);
+		assert.match(error.message, /Include ID File.*Include Placeholder Map/);
+		assert.equal(analyzeCalls.length, 0);
+	});
+
+	test('off with Share Map Across Items still keeps placeholders consistent', async () => {
+		const out = await run({
+			items: [{}, {}],
+			params: protectParams({
+				text: 'Janez Novak',
+				options: { includePlaceholderMap: false, shareMapAcrossItems: true },
+			}),
+		});
+		assert.equal(out[0].json.protectedText, out[1].json.protectedText);
+		for (const item of out) assert.ok(!('placeholderMap' in item.json));
+	});
+
+	test('Reveal still works with the map of a run that included it', async () => {
+		const [protectedItem] = await run({
+			params: protectParams({ options: { includePlaceholderMap: true } }),
+		});
+		const [revealed] = await run({
+			params: revealParams(protectedItem.json.protectedText, protectedItem.json.placeholderMap),
+		});
+		assert.equal(revealed.json.revealedText, SAMPLE);
+	});
+});
+
+describe('Ignore Terms (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	const TEXT = 'Janez Novak from Acme wrote to ana.kovac@example.com about ACME Cloud.';
+	const companySpans = (text) => [
+		...detect(text),
+		...[...text.matchAll(/Acme Cloud|ACME Cloud|Acme/g)].map((m) => ({
+			entity_type: 'ORGANIZATION',
+			start: m.index,
+			end: m.index + m[0].length,
+			score: 0.6,
+		})),
+	];
+
+	test('Protect: detections equal to a term are left in the text', async () => {
+		analyzeBehaviour.spans = companySpans;
+		const [item] = await run({
+			params: protectParams({ text: TEXT, options: { ignoreTerms: 'acme\nJanez Novak' } }),
+		});
+		const { protectedText, placeholderMap, entities } = item.json;
+		assert.ok(protectedText.startsWith('Janez Novak from Acme wrote to [EMAIL_ADDRESS_'));
+		// "ACME Cloud" is not equal to a term, so it is still replaced.
+		assert.match(protectedText, /about \[ORGANIZATION_[a-z0-9]{5}\]\.$/);
+		assert.deepEqual(
+			entities.map((e) => e.entityType),
+			['EMAIL_ADDRESS', 'ORGANIZATION'],
+		);
+		assert.ok(!Object.values(placeholderMap).includes('Janez Novak'));
+		assert.equal(analyzeCalls[0].text, TEXT, 'the full text is still sent');
+	});
+
+	test('Protect: a value already in the existing map wins over Ignore Terms', async () => {
+		const [item] = await run({
+			params: protectParams({
+				text: 'Janez Novak called.',
+				options: {
+					ignoreTerms: 'Janez Novak',
+					existingPlaceholderMap: { PERSON_abcde: 'Janez Novak' },
+				},
+			}),
+		});
+		assert.equal(item.json.protectedText, '[PERSON_abcde] called.');
+	});
+
+	test('Detect: ignored detections are not reported', async () => {
+		analyzeBehaviour.spans = companySpans;
+		const [item] = await run({
+			params: { operation: 'detect', text: TEXT, options: { ignoreTerms: 'Acme, acme cloud' } },
+		});
+		assert.deepEqual(item.json.countsByType, { PERSON: 1, EMAIL_ADDRESS: 1 });
+	});
+});
+
+describe('Detect (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	const detectParams = (overrides = {}) => ({ operation: 'detect', text: SAMPLE, ...overrides });
+
+	test('reports counts and original-text offsets without values, text unchanged', async () => {
+		const [item] = await run({ params: detectParams() });
+		assert.deepEqual(item.pairedItem, { item: 0 });
+		assert.equal(analyzeCalls.length, 1);
+		assert.equal(analyzeCalls[0].entityTypes, undefined);
+		const { hasPersonalData, entityCount, countsByType, entities } = item.json;
+		assert.equal(hasPersonalData, true);
+		assert.equal(entityCount, 3);
+		assert.deepEqual(countsByType, { PERSON: 1, EMAIL_ADDRESS: 1, IBAN: 1 });
+		assert.deepEqual(
+			entities.map((e) => SAMPLE.slice(e.start, e.end)),
+			['Janez Novak', 'ana.kovac@example.com', 'SI56 1910 0000 0123 438'],
+		);
+		for (const entity of entities) {
+			assert.ok(!('value' in entity));
+			assert.equal(entity.score, 0.85);
+		}
+		assert.deepEqual(Object.keys(item.json).sort(), [
+			'countsByType',
+			'entities',
+			'entityCount',
+			'hasPersonalData',
+		]);
+		assert.ok(!JSON.stringify(item.json).includes('Janez'), 'no values without Include Values');
+	});
+
+	test('Include Values adds the matched text', async () => {
+		const [item] = await run({ params: detectParams({ options: { includeValues: true } }) });
+		assert.deepEqual(
+			item.json.entities.map((e) => e.value),
+			['Janez Novak', 'ana.kovac@example.com', 'SI56 1910 0000 0123 438'],
+		);
+	});
+
+	test('counts repeat occurrences per type', async () => {
+		const text = 'Janez Novak and Marko Horvat met Janez Novak.';
+		const [item] = await run({ params: detectParams({ text }) });
+		assert.deepEqual(item.json.countsByType, { PERSON: 3 });
+		assert.equal(item.json.entityCount, 3);
+	});
+
+	test('nothing found: hasPersonalData false, empty counts', async () => {
+		const [item] = await run({ params: detectParams({ text: 'The weather is nice.' }) });
+		assert.deepEqual(item.json, {
+			hasPersonalData: false,
+			entityCount: 0,
+			countsByType: {},
+			entities: [],
+		});
+	});
+
+	test('blank text never reaches the gateway', async () => {
+		const [item] = await run({ params: detectParams({ text: '   ' }) });
+		assert.equal(analyzeCalls.length, 0);
+		assert.equal(item.json.hasPersonalData, false);
+	});
+
+	test('selected types are sent as the filter; entityFilterIgnored is passed on', async () => {
+		analyzeBehaviour.entityFilterIgnored = true;
+		const [item] = await run({
+			params: detectParams({ detect: 'selected', entityTypes: ['IBAN'] }),
+		});
+		assert.deepEqual(analyzeCalls[0].entityTypes, ['IBAN', 'IBAN_CODE']);
+		assert.equal(item.json.entityFilterIgnored, true);
+		assert.deepEqual(item.json.countsByType, { IBAN: 1 });
+	});
+
+	test('overlapping detections are resolved as Protect does: earliest, then longest', async () => {
+		analyzeBehaviour.spans = () => [
+			{ entity_type: 'LOCATION', start: 6, end: 11, score: 0.5 },
+			{ entity_type: 'PERSON', start: 0, end: 11, score: 0.912 },
+			{ entity_type: 'PERSON', start: 0, end: 5, score: 0.7 },
+		];
+		const [item] = await run({ params: detectParams({ text: 'Janez Novak' }) });
+		assert.deepEqual(item.json.entities, [
+			{ entityType: 'PERSON', start: 0, end: 11, score: 0.91 },
+		]);
+	});
+
+	test('the existing placeholder map is not used: gateway findings only', async () => {
+		const [item] = await run({
+			params: detectParams({
+				text: 'Petra wrote.',
+				options: { existingPlaceholderMap: { PERSON_abcde: 'Petra' } },
+			}),
+		});
+		assert.equal(item.json.hasPersonalData, false);
+	});
+
+	test('Include Input Fields keeps the input item', async () => {
+		const [item] = await run({
+			items: [{ ticket: 7 }],
+			params: detectParams({ options: { includeInputFields: true } }),
+		});
+		assert.equal(item.json.ticket, 7);
+		assert.equal(item.json.hasPersonalData, true);
+	});
+
+	test('gateway failures are mapped like Protect', async () => {
+		analyzeBehaviour.throw = new GatewayError('auth_required', 'rejected', 401);
+		const error = await runError({ params: detectParams() });
+		assert.ok(error instanceof NodeApiError);
+		assert.equal(error.message, 'The Anonymizator API key was rejected');
 	});
 });
 
@@ -1029,6 +1333,29 @@ describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
 		assert.deepEqual(out, [
 			{ json: { error: 'The Anonymizator API key was rejected' }, pairedItem: { item: 0 } },
 		]);
+	});
+
+	test('detect seals the text and reports offsets into the original, emoji included', async () => {
+		const fake = makeGateway({ root });
+		const text = '😀😀 Janez Novak, ana.kovac@example.com 👍';
+		const [item] = await runFull({
+			params: { operation: 'detect', text, options: { includeValues: true } },
+			http: fake.http,
+		});
+		const post = fake.requests.find((r) => r.method === 'POST');
+		assert.ok(!post.body.toString('latin1').includes('Janez'));
+		assert.deepEqual(
+			item.json.entities.map((e) => [e.entityType, text.slice(e.start, e.end), e.value]),
+			[
+				['PERSON', 'Janez Novak', 'Janez Novak'],
+				['EMAIL_ADDRESS', 'ana.kovac@example.com', 'ana.kovac@example.com'],
+			],
+		);
+		assert.equal(
+			item.json.entities[0].start,
+			5,
+			'UTF-16: two emoji are four code units, then a space',
+		);
 	});
 
 	test('reveal makes no request even when a helper is available', async () => {

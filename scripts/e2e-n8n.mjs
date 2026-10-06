@@ -21,8 +21,12 @@
  *
  * Exit status is 0 only when every node in the workflow ran, produced items and none failed. Still
  * confirm with the container log: a node that is never reached leaves no trace in the API either.
+ *
+ * It also imports every example under examples/ (without running it), with the package type prefix
+ * rewritten to CUSTOM., and checks that n8n knows every node type and version the example uses, so
+ * an example never opens with unknown "?" nodes.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,6 +38,8 @@ const NODE_TYPE = 'CUSTOM.anonymizator';
 const CREDENTIAL_TYPE = 'anonymizatorApi';
 const CREDENTIAL_NAME = 'Anonymizator API';
 const WORKFLOW_FILE = resolve(here, '../e2e/anonymizator-e2e.workflow.json');
+const EXAMPLES_DIR = resolve(here, '../examples');
+const PACKAGE_TYPE_PREFIX = 'n8n-nodes-anonymizator.';
 
 function loadApiKey() {
 	if (process.env.ANON_API_KEY) return process.env.ANON_API_KEY.trim();
@@ -147,9 +153,10 @@ log('authenticated as', EMAIL);
 // --- The node as n8n loaded it -------------------------------------------------------------
 // The editor reads node descriptions from /types/nodes.json; checking it proves the package loaded
 // from the custom folder, that Reveal shows no credential, and that both icons are served.
+let all = [];
 {
 	const types = await req('/types/nodes.json', { cookie });
-	const all = Array.isArray(types.data) ? types.data : [];
+	all = Array.isArray(types.data) ? types.data : [];
 	const node = all.find((t) => t.name === NODE_TYPE);
 	if (!check(Boolean(node), `node type ${NODE_TYPE} is loaded`, `(${all.length} types listed)`)) {
 		log(
@@ -164,8 +171,8 @@ log('authenticated as', EMAIL);
 	const anonCred = creds.find((c) => c.name === CREDENTIAL_TYPE);
 	const shownFor = anonCred?.displayOptions?.show?.operation;
 	check(
-		creds.length === 1 && JSON.stringify(shownFor) === '["protect"]',
-		'credential is shown only for Protect (Reveal needs none)',
+		creds.length === 1 && JSON.stringify(shownFor) === '["protect","detect"]',
+		'credential is shown only for Protect and Detect (Reveal needs none)',
 		JSON.stringify(creds.map((c) => ({ name: c.name, show: c.displayOptions?.show }))),
 	);
 
@@ -316,6 +323,46 @@ for (const name of expectedNodes) {
 	}
 	check(items.length > 0, `node ran: ${name}`, `${items.length} item(s)`);
 	if (name.startsWith('Check')) log(`      ${redact(items[0]?.json ?? {}).slice(0, 300)}`);
+}
+
+// --- Import the examples (no run: they call an LLM) ---------------------------------------------
+for (const dir of readdirSync(EXAMPLES_DIR, { withFileTypes: true })) {
+	if (!dir.isDirectory()) continue;
+	const example = JSON.parse(
+		readFileSync(resolve(EXAMPLES_DIR, dir.name, 'workflow.json'), 'utf8'),
+	);
+	// Examples ship the type a Settings → Community Nodes install registers; the Docker n8n loads the
+	// package from the custom folder, which registers it as CUSTOM.<node>.
+	for (const node of example.nodes) {
+		if (node.type.startsWith(PACKAGE_TYPE_PREFIX)) {
+			node.type = `CUSTOM.${node.type.slice(PACKAGE_TYPE_PREFIX.length)}`;
+		}
+		if (node.credentials?.[CREDENTIAL_TYPE]) {
+			node.credentials[CREDENTIAL_TYPE] = { id: credentialId, name: CREDENTIAL_NAME };
+		}
+	}
+	const unknown = example.nodes.filter((node) => {
+		const type = all.find((t) => t.name === node.type);
+		const versions = [type?.version ?? []].flat();
+		return !type || !versions.includes(node.typeVersion);
+	});
+	check(
+		unknown.length === 0,
+		`example ${dir.name}: every node type and version is known to n8n`,
+		unknown.map((n) => `${n.name} (${n.type} v${n.typeVersion})`).join(', '),
+	);
+	const imported = await req('/rest/workflows', { method: 'POST', cookie, body: example });
+	const importedNodes = imported.data?.data?.nodes ?? [];
+	check(
+		imported.status === 200 && importedNodes.length === example.nodes.length,
+		`example ${dir.name}: imports`,
+		`HTTP ${imported.status}, ${importedNodes.length} of ${example.nodes.length} nodes`,
+	);
+	const exampleId = imported.data?.data?.id;
+	if (exampleId) {
+		await req(`/rest/workflows/${exampleId}/archive`, { method: 'POST', cookie });
+		await req(`/rest/workflows/${exampleId}`, { method: 'DELETE', cookie });
+	}
 }
 
 if (process.env.KEEP_WORKFLOW === '1') {

@@ -4,6 +4,9 @@
 	"description": "Protect personal data in text before it reaches an LLM: replace names, emails, IBANs and other identifiers with placeholders through the Anonymizator privacy gateway, and reveal them again offline.",
 	"license": "MIT",
 	"homepage": "https://github.com/cbuctok/n8n-nodes-anonymizator",
+	"bugs": {
+		"url": "https://github.com/cbuctok/n8n-nodes-anonymizator/issues"
+	},
 	"keywords": [
 		"n8n-community-node-package",
 		"anonymization",

@@ -25,14 +25,14 @@ test('node description: names, credential gated on Protect, tool usage', () => {
 		{
 			name: 'anonymizatorApi',
 			required: true,
-			displayOptions: { show: { operation: ['protect'] } },
+			displayOptions: { show: { operation: ['protect', 'detect'] } },
 		},
 	]);
 	const op = d.properties.find((p) => p.name === 'operation');
 	assert.equal(op.default, 'protect');
 	assert.deepEqual(
 		op.options.map((o) => o.value),
-		['protect', 'reveal'],
+		['detect', 'protect', 'reveal'],
 	);
 });
 
@@ -55,4 +55,18 @@ test('codex categories are valid community categories', () => {
 	const codex = require('../dist/nodes/Anonymizator/Anonymizator.node.json');
 	assert.equal(codex.node, 'n8n-nodes-anonymizator.anonymizator');
 	assert.deepEqual(codex.categories, ['Utility', 'Development']);
+});
+
+test('codex alias lists search terms for the nodes panel', () => {
+	const codex = require('../dist/nodes/Anonymizator/Anonymizator.node.json');
+	assert.ok(Array.isArray(codex.alias));
+	for (const term of ['PII', 'anonymize', 'pseudonymize', 'redact', 'GDPR', 'personal data']) {
+		assert.ok(codex.alias.includes(term), term);
+	}
+	for (const term of codex.alias) assert.equal(typeof term, 'string');
+	assert.equal(new Set(codex.alias).size, codex.alias.length, 'no duplicates');
+});
+
+test('package.json points bug reports at GitHub issues', () => {
+	assert.equal(pkg.bugs.url, 'https://github.com/cbuctok/n8n-nodes-anonymizator/issues');
 });

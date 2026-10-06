@@ -18,6 +18,7 @@ import { anonymizeFromSpans, mask } from '../shared/anonymizer';
 import { ENTITY_OPTIONS, selectionToEntityTypes } from '../shared/entities';
 import { errorNode, GatewayError } from '../shared/errors';
 import { analyze } from '../shared/gateway';
+import { filterIgnoredSpans, parseIgnoreTerms } from '../shared/ignoreTerms';
 import { parsePlaceholderMap, toIdFile } from '../shared/placeholderMap';
 import type { ParsedPlaceholderMap } from '../shared/placeholderMap';
 import type {
@@ -30,10 +31,23 @@ import type {
 } from '../shared/types';
 
 const showForProtect = { show: { operation: ['protect'] } };
+const showForGateway = { show: { operation: ['protect', 'detect'] } };
 
 /** Accepted map formats, quoted in every map error so the user knows what to send. */
 export const MAP_FORMATS_HINT =
 	'Accepted formats: a JSON object of placeholders to values (bare or [bracketed] keys, e.g. {"PERSON_a7k2q": "Janez Novak"}), an array of {placeholder, value} objects, or an ID file saved by the Anonymizator browser extension.';
+
+/** Ignore Terms option, shared by Protect and Detect. */
+export const IGNORE_TERMS_OPTION: INodeProperties = {
+	displayName: 'Ignore Terms',
+	name: 'ignoreTerms',
+	type: 'string',
+	typeOptions: { rows: 2 },
+	default: '',
+	placeholder: 'e.g. Acme, Acme Cloud',
+	description:
+		'Terms that are never treated as personal data, such as your company or product names. Separate them with commas or new lines. A detection is dropped when its whole text equals a term (ignoring case). The text is still sent to the gateway as is; the terms never leave n8n.',
+};
 
 export const protectDescription: INodeProperties[] = [
 	{
@@ -65,7 +79,7 @@ export const protectDescription: INodeProperties[] = [
 		],
 		default: 'all',
 		description: 'Which kinds of personal data to look for',
-		displayOptions: showForProtect,
+		displayOptions: showForGateway,
 	},
 	{
 		displayName: 'Entity Types',
@@ -75,8 +89,8 @@ export const protectDescription: INodeProperties[] = [
 		options: ENTITY_OPTIONS,
 		default: [],
 		description:
-			'The kinds of personal data to detect. Selecting every type is the same as All Types.',
-		displayOptions: { show: { operation: ['protect'], detect: ['selected'] } },
+			"The kinds of personal data to detect. Selecting every type is the same as 'All Types'.",
+		displayOptions: { show: { operation: ['protect', 'detect'], detect: ['selected'] } },
 	},
 	{
 		displayName: 'Placeholder Style',
@@ -126,16 +140,18 @@ export const protectDescription: INodeProperties[] = [
 				name: 'existingPlaceholderMap',
 				type: 'json',
 				default: '{}',
+				placeholder: "e.g. {{ $('Protect').item.json.placeholderMap }}",
 				description:
-					'Continue an earlier map: values it already holds keep their placeholders, new placeholders never collide with it, and sequential numbering carries on. Accepts the same formats as Reveal, including an ID file from the browser extension.',
+					'Continue an earlier map: values it already holds keep their placeholders, new placeholders never collide with it, and sequential numbering carries on. Values in this map are always replaced, even when they are also listed in Ignore Terms. Accepts the same formats as Reveal, including an ID file from the browser extension.',
 			},
+			IGNORE_TERMS_OPTION,
 			{
 				displayName: 'Include ID File',
 				name: 'includeIdFile',
 				type: 'boolean',
 				default: false,
 				description:
-					'Whether to add an idFile field that the Anonymizator browser extension can open with Load IDs. To save it, use Convert to File → Convert to Text File with Text Input Field set to idFile (Convert to JSON wraps it in the item, and the extension refuses that file). Only for Random and Sequential styles, and only when the map is not empty.',
+					"Whether to add an idFile field that the Anonymizator browser extension can open with Load IDs. To save it, use Convert to File → Convert to Text File with 'Text Input Field' set to idFile (Convert to JSON wraps it in the item, and the extension refuses that file). Only for Random and Sequential styles, and only when the map is not empty. The file holds the real values, so it needs 'Include Placeholder Map' on.",
 			},
 			{
 				displayName: 'Include Input Fields',
@@ -143,6 +159,14 @@ export const protectDescription: INodeProperties[] = [
 				type: 'boolean',
 				default: false,
 				description: 'Whether to copy the fields of the input item into the output item',
+			},
+			{
+				displayName: 'Include Placeholder Map',
+				name: 'includePlaceholderMap',
+				type: 'boolean',
+				default: true,
+				description:
+					'Whether to output placeholderMap, which holds the real values. Turn it off when the output goes back to an LLM, for example when an AI agent calls this node as a tool: returning the map would hand the real values to the model. Without the map, the protected text cannot be revealed later.',
 			},
 			{
 				displayName: 'Share Map Across Items',
@@ -155,6 +179,14 @@ export const protectDescription: INodeProperties[] = [
 		],
 	},
 ];
+
+/** Reads Detect and Entity Types into the gateway filter (undefined = all types). */
+export function readEntityTypes(ctx: IExecuteFunctions, itemIndex: number): string[] | undefined {
+	const detect = ctx.getNodeParameter('detect', itemIndex, 'all') as string;
+	return detect === 'selected'
+		? selectionToEntityTypes(ctx.getNodeParameter('entityTypes', itemIndex, []) as string[])
+		: undefined;
+}
 
 /**
  * Running state for one execution when maps are shared across items. Created once by the execute
@@ -392,12 +424,7 @@ export async function executeProtect(
 	runState: ProtectRunState,
 ): Promise<INodeExecutionData[]> {
 	const text = readTextParameter(this, itemIndex, 'Text');
-
-	const detect = this.getNodeParameter('detect', itemIndex, 'all') as string;
-	const entityTypes =
-		detect === 'selected'
-			? selectionToEntityTypes(this.getNodeParameter('entityTypes', itemIndex, []) as string[])
-			: undefined;
+	const entityTypes = readEntityTypes(this, itemIndex);
 
 	const style = this.getNodeParameter('placeholderStyle', itemIndex, 'random') as Numbering;
 	if (!NUMBERINGS.includes(style)) {
@@ -408,6 +435,20 @@ export async function executeProtect(
 	}
 
 	const options = this.getNodeParameter('options', itemIndex, {}) as IDataObject;
+	// Default on: an absent option (older saved workflows) keeps the map in the output.
+	const includeMap = options.includePlaceholderMap !== false;
+	if (!includeMap && options.includeIdFile === true) {
+		throw new NodeOperationError(
+			errorNode(this),
+			"'Include ID File' needs 'Include Placeholder Map' on",
+			{
+				itemIndex,
+				description:
+					"The ID file holds the same real values as the placeholder map. Turn off 'Include ID File', or turn 'Include Placeholder Map' back on. Nothing was sent to the gateway.",
+			},
+		);
+	}
+	const ignoreTerms = parseIgnoreTerms(options.ignoreTerms);
 	const existing = parseMapParameter(
 		this,
 		options.existingPlaceholderMap,
@@ -427,6 +468,9 @@ export async function executeProtect(
 			throw gatewayFailure(this, error, itemIndex);
 		}
 	}
+	// Ignore Terms only drops gateway detections. Values of the existing map are matched later by
+	// anonymizeFromSpans and are still replaced: the map wins.
+	spans = filterIgnoredSpans(text, spans, ignoreTerms);
 
 	// Tombstones (keys used before but no longer in the table) are passed as empty values so new
 	// placeholders never reuse them; empty values are never matched in the text.
@@ -497,6 +541,13 @@ export async function executeProtect(
 		options.includeInputFields === true
 			? { ...(this.getInputData()[itemIndex]?.json ?? {}), ...result }
 			: { ...result };
+
+	if (!includeMap) {
+		// Also removes a placeholderMap or idFile copied from the input item by Include Input Fields,
+		// so the output never carries real values in these fields.
+		delete json.placeholderMap;
+		delete json.idFile;
+	}
 
 	return [{ json, pairedItem: { item: itemIndex } }];
 }

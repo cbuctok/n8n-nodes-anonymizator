@@ -3,7 +3,8 @@
 This is an n8n community node that keeps personal data out of your prompts. **Protect** finds names,
 email addresses, bank accounts, national ID numbers and other personal data in text and replaces
 them with placeholders such as `[PERSON_a7k2q]` before the text goes to an LLM. **Reveal** puts the
-original values back into the LLM's answer, using the placeholder map Protect produced.
+original values back into the LLM's answer, using the placeholder map Protect produced. **Detect**
+reports what personal data a text contains without changing it, for routing before an LLM call.
 
 Detection runs on the Anonymizator privacy gateway (`anon.prosecco37.com`), operated by Prosecco 37.
 Names, locations and similar free-text data are found with **named-entity recognition (NER)**, a
@@ -11,7 +12,8 @@ statistical model that recognises them from their context in the sentence rather
 pattern; regional identifiers such as EMŠO, OIB and IBAN are found by recognisers that validate the
 number. The text is end-to-end encrypted (HPKE) to the gateway, which returns only the positions of
 what it found and keeps nothing. Everything else happens inside n8n: the placeholders, the map, masking and Reveal.
-Reveal never contacts the gateway and needs no credential.
+Reveal never contacts the gateway and needs no credential. [What leaves n8n](#what-leaves-n8n) lists
+exactly what is sent.
 
 The node name is **Anonymizator**; the credential is **Anonymizator API**.
 
@@ -25,9 +27,11 @@ workflow automation platform.
 - [Usage](#usage)
 - [Which placeholders to use](#which-placeholders-to-use)
 - [Placeholder maps and the browser extension](#placeholder-maps-and-the-browser-extension)
+- [What leaves n8n](#what-leaves-n8n)
 - [Privacy notes](#privacy-notes)
 - [How it differs from the Guardrails node](#how-it-differs-from-the-guardrails-node)
 - [Resources](#resources)
+- [Support](#support)
 - [Licence](#licence)
 - [Version history](#version-history)
 
@@ -42,8 +46,9 @@ The package name to install is:
 n8n-nodes-anonymizator
 ```
 
-Enter it exactly as written in **Settings → Community Nodes → Install**. It is unscoped, so there is
-no `@org/` prefix.
+Enter it exactly as written in **Settings → Community Nodes → Install** on a self-hosted instance.
+It is unscoped, so there is no `@org/` prefix. Once n8n has verified the node, it can also be added
+straight from the nodes panel, including on n8n Cloud; until then, install it as above.
 
 ## Operations
 
@@ -63,10 +68,12 @@ Options:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| **Existing Placeholder Map** | empty | Continue an earlier map. Values it already holds keep their placeholders (and are replaced wherever they appear, even if the gateway would not have detected them), new placeholders never collide with it, and Sequential numbering carries on. Accepts every [map format](#accepted-map-formats), including an ID file from the browser extension. |
+| **Existing Placeholder Map** | empty | Continue an earlier map. Values it already holds keep their placeholders (and are replaced wherever they appear, even if the gateway would not have detected them or they are listed in Ignore Terms), new placeholders never collide with it, and Sequential numbering carries on. Accepts every [map format](#accepted-map-formats), including an ID file from the browser extension. |
+| **Ignore Terms** | empty | Terms that are never treated as personal data, such as your company or product names, separated by commas or new lines (a term that itself contains a comma, such as "Acme, Inc.", can be given in an array set by expression, for example `{{ ["Acme, Inc.", "Orion"] }}`). A detection is dropped when its whole text equals a term, ignoring case ("Acme" drops a detected "ACME", not "Acme Cloud"). The terms never leave n8n; the text is still sent whole. Values in the Existing Placeholder Map are replaced anyway: the map wins. |
 | **Share Map Across Items** | off | One running map for all items of the execution, so the same person gets the same placeholder in every item. Each item outputs the map as it stands after that item. A placeholder that stands for different values in two items' existing maps stops the item with an error. |
 | **Include ID File** | off | Adds an `idFile` field the browser extension can open with **Load IDs**. To save it, use **Convert to File → Convert to Text File** with **Text Input Field** set to `idFile` (Convert to JSON would wrap it in the item, and the extension refuses that file). Random and Sequential styles only. Not added when the map is empty (nothing was detected and no Existing Placeholder Map was given). |
 | **Include Input Fields** | off | Copies the input item's fields into the output item. |
+| **Include Placeholder Map** | on | Turn it off when the output goes back to an LLM, for example when an AI agent calls Protect as a tool: the map holds the real values, and returning it would hand them to the model. Without the map the protected text **cannot be revealed later**. When off, the output has no `placeholderMap` and no `idFile` (also not copied from the input by Include Input Fields), and turning on Include ID File as well stops the item with an error before anything is sent. |
 
 Output, one item per input item:
 
@@ -89,10 +96,54 @@ Output, one item per input item:
 | Field | Notes |
 | --- | --- |
 | `protectedText` | The text with placeholders. |
-| `placeholderMap` | The complete map needed to reveal this text: the existing map plus the new placeholders. Person names also get `_NAME` and `_SURNAME` entries, so an answer that mentions only "Janez" is revealed too. Retired placeholders from the existing map are kept with an empty value, so they stay retired when you pass the map back in. Empty (`{}`) for Type Only and Redacted. |
+| `placeholderMap` | The complete map needed to reveal this text: the existing map plus the new placeholders. Person names also get `_NAME` and `_SURNAME` entries, so an answer that mentions only "Janez" is revealed too. Retired placeholders from the existing map are kept with an empty value, so they stay retired when you pass the map back in. Empty (`{}`) for Type Only and Redacted. Left out when Include Placeholder Map is off. **It holds the real values.** |
 | `entities` | What was replaced, with `start`/`end` offsets into `protectedText`. |
 | `entityFilterIgnored` | Present (`true`) only when the gateway refused the selected types and the node detected all types instead. |
 | `idFile` | Present only with Include ID File, and only when `placeholderMap` has at least one value. |
+
+### Detect
+
+Runs the same detection as Protect but changes nothing: it reports what personal data the text
+contains. Use it to route items, for example with an IF node on `hasPersonalData` before an LLM
+call. Needs the **Anonymizator API** credential, and sends the text to the gateway exactly as Protect
+does.
+
+| Parameter | Notes |
+| --- | --- |
+| **Text** | The text to check. |
+| **Detect** / **Entity Types** | As in Protect. |
+
+Options:
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| **Ignore Terms** | empty | As in Protect: detections equal to a term are not reported. |
+| **Include Input Fields** | off | Copies the input item's fields into the output item. |
+| **Include Values** | off | Adds the matched text to each entity as `value`. These are the personal data themselves: leave this off when the output goes to an LLM, an AI agent or a log. |
+
+Output:
+
+```json
+{
+  "hasPersonalData": true,
+  "entityCount": 2,
+  "countsByType": { "PERSON": 1, "EMAIL_ADDRESS": 1 },
+  "entities": [
+    { "entityType": "PERSON", "start": 18, "end": 29, "score": 0.85 },
+    { "entityType": "EMAIL_ADDRESS", "start": 46, "end": 67, "score": 1 }
+  ]
+}
+```
+
+| Field | Notes |
+| --- | --- |
+| `hasPersonalData` | `true` when at least one entity was found. |
+| `entityCount` / `countsByType` | How many entities were found, in total and per type. |
+| `entities` | `start` and `end` are offsets into the **original** text, in JavaScript string units (UTF-16), so `text.slice(start, end)` is the value. Overlapping detections are resolved the way Protect resolves them. |
+| `entityFilterIgnored` | As in Protect. |
+
+Detect reports what the gateway found, nothing else: there is no placeholder map, so it does not
+know about values that only an Existing Placeholder Map would have matched.
 
 ### Reveal
 
@@ -112,6 +163,9 @@ Output:
 | `revealedText` | The text with the original values. |
 | `unresolvedPlaceholders` | Bracketed placeholders such as `[PERSON_x9y8z]` that the map could not resolve, for example because the LLM invented one or the text was masked. Empty when everything was revealed. |
 
+Reveal's output contains the real values. Do not give Reveal to an AI agent as a tool when what the
+agent produces leaves your control: whatever the tool returns goes back into the model's context.
+
 Reveal replaces bracketed placeholders (`[PERSON_6kltt]`) and also the same key written without
 brackets as a whole word (`PERSON_6kltt`), because LLMs sometimes drop the brackets. If you add your
 own keys to a map, avoid ordinary words: a key `CLIENT` would also replace the word "CLIENT" in the
@@ -121,11 +175,11 @@ answer.
 
 You need an Anonymizator API key. API keys are created and managed in the Prosecco 37 Anonymizator
 user portal. Paste the key into the credential's **API Key** field.
-<!-- TODO: add the user portal URL once it is public. -->
+<!-- TODO(api-key-portal): add the user portal URL (where to get a key) once it is public. -->
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| API Key | Yes | Stored as a password field and sent as a bearer token. Only Protect uses it. |
+| API Key | Yes | Stored as a password field and sent as a bearer token. Only Protect and Detect use it. |
 
 There is no base URL field: the node always talks to `https://anon.prosecco37.com`, because it only
 trusts encryption keys signed by the Anonymizator trust root.
@@ -139,14 +193,17 @@ you save the credential rather than on the first run:
 
 ## Compatibility
 
-- Verified end to end on n8n 2.41.7 (self-hosted, Docker). The node uses only the standard
-  community-node API (nodes API version 1) and Node.js's built-in `crypto`.
+- Tested end to end on n8n 2.41.7 (self-hosted, Docker), the only version tested so far. The node
+  uses the community-node API version 1 and Node.js's built-in `crypto`. It also relies on features
+  of recent n8n releases (themed icons, `NodeConnectionTypes`, tool usage), so old 1.x releases are
+  not expected to work; a minimum version has not been established.
 - No runtime dependencies.
 - The n8n host must reach `https://anon.prosecco37.com` over HTTPS and have a correct clock: requests
   carry a timestamp and the gateway refuses stale ones.
 - Usable as an AI Agent tool (`usableAsTool`). n8n 2.x generates the tool variant automatically; no
   environment variable is needed (old n8n 1.x releases needed
-  `N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true`). Read the [tool caveat](#privacy-notes) first.
+  `N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true`). Read [As an AI Agent tool](#as-an-ai-agent-tool)
+  first.
 
 ## Usage
 
@@ -167,6 +224,38 @@ The usual shape is three nodes:
 
 The model only ever sees placeholders. Check `unresolvedPlaceholders` after Reveal if the answer is
 going to a person: a non-empty list means the model altered or invented a placeholder.
+
+A ready-made version of this flow, with a Basic LLM Chain and sticky notes, is in
+[`examples/protect-llm-reveal`](examples/protect-llm-reveal/README.md); import its `workflow.json`
+with **Import from File**. A Basic LLM Chain outputs only `text` and drops every other field, which
+is why Reveal reads the map from the Protect node by name rather than from `$json`.
+
+### Detect, then route
+
+To decide what to do before anything reaches a model, put **Detect** first and an IF node on
+`{{ $json.hasPersonalData }}`: for example, send texts without personal data straight to the LLM and
+the rest through Protect, or to a person. `countsByType` lets you route on specific kinds, such as
+`{{ (($json.countsByType.IBAN ?? 0) + ($json.countsByType.IBAN_CODE ?? 0)) > 0 }}` (the gateway can
+report an IBAN as either type, so check both). Detect and Protect each call the gateway, so this costs two
+requests for texts that go on to Protect.
+
+### As an AI Agent tool
+
+The node can be attached to an AI Agent as a tool. Everything a tool returns goes back into the
+model's context, so:
+
+- **Protect as a tool:** turn **Include Placeholder Map** off, or use the **Type Only** or
+  **Redacted** style, which keep no map. With the map on, the real values would be returned to the
+  model, which defeats the purpose. Without the map, the model's answer cannot be revealed later.
+- **Detect as a tool:** leave **Include Values** off; the counts and types are enough for the model
+  to decide.
+- **Keep the real text out of the tool's input and output:** leave **Include Input Fields** off
+  (it would copy the original text field back into the result), and set **Text** from workflow
+  data, not with `$fromAI()`: text the model fills in is text the model has already seen.
+- **Reveal as a tool:** avoid it. Its output is the real values, shown to the model.
+- The safest layout is not a tool at all: run Protect as a normal node **before** the agent and
+  Reveal **after** it, as in the flow above. The tool variant has been checked to load in n8n, not
+  yet run with an agent.
 
 ### Many items
 
@@ -251,15 +340,46 @@ extension:
 
 ID files hold the real values. Keep them as private as the data itself.
 
+## What leaves n8n
+
+Only **Protect** and **Detect** make network requests, and only to `https://anon.prosecco37.com`,
+through n8n's own HTTP helper (so n8n's proxy settings apply). There is no telemetry, analytics or
+any other endpoint.
+
+| Sent to the gateway | When | Notes |
+| --- | --- | --- |
+| `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process, plus once more when the gateway rotates its key and one retry after a server error (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed public key, checked against the pinned trust root before anything else is sent. |
+| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text; at most a few times when the gateway asks for a retry (a 5xx answer, a key rotation, or a refused entity filter) | The body is HPKE-encrypted (RFC 9180) to the verified key. |
+| Inside the encrypted body | | The **Text** parameter, with each half of an emoji (UTF-16 surrogate) replaced by a space so that positions line up, and, with Selected Types, the list of entity types. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
+| In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key. |
+| In the clear, as HTTP headers | | `Content-Type`, `Accept`, `Authorization`, and the standard headers n8n's HTTP helper adds. |
+
+Never sent anywhere:
+
+- the placeholders and the placeholder map, including the **Existing Placeholder Map** you pass in;
+- **Ignore Terms** (they are applied after detection, inside n8n);
+- ID files;
+- anything **Reveal** reads or writes: Reveal makes no network request and needs no credential;
+- the other fields of the input item, and blank text.
+
+The gateway answers with entity types, positions and scores, encrypted with a key only this request
+can derive. It returns no text, no placeholders and no map. The gateway is operated by Prosecco 37,
+which states that it is stateless and keeps nothing. The node cannot verify what happens on the
+server; what it can guarantee is the list above.
+
 ## Privacy notes
 
-- **What leaves n8n:** only Protect's text, encrypted with HPKE (RFC 9180) to the gateway's current
-  key. Network intermediaries, including the CDN in front of the gateway, see ciphertext. Before
+- **What leaves n8n:** only the text of Protect and Detect, encrypted with HPKE (RFC 9180) to the
+  gateway's current key; see [What leaves n8n](#what-leaves-n8n) for the details. Network
+  intermediaries, including the CDN in front of the gateway, see ciphertext. Before
   sending, the node checks that the gateway's key is signed by the pinned Anonymizator trust root;
   if it is not, nothing is sent and the item stops with an explanation (this can mean a
   TLS-inspecting proxy is intercepting the connection).
 - **What the gateway returns:** positions and types of what it found. It never sees placeholders or
   maps and keeps nothing.
+- **Where the map lives:** Protect creates the placeholder map inside n8n and outputs it, so the map
+  and the real values are in the Protect output item, like any other n8n data. Treat that output as
+  personal data; turn off **Include Placeholder Map** where it should not travel further.
 - **What stays in n8n:** the placeholder map and everything Reveal does. Reveal makes no network
   request.
 - **n8n stores execution data.** Saved executions contain the original text and the placeholder map.
@@ -267,36 +387,48 @@ ID files hold the real values. Keep them as private as the data itself.
   possible, failed ones) in the
   [workflow settings](https://docs.n8n.io/build/manage-workflows/configure-workflow-settings), or
   restrict who can view executions.
-- **AI Agent tools see their results.** If an agent calls Protect as a tool, the tool's output,
-  including `placeholderMap` with the original values, goes back into the model's context, which
-  defeats the purpose. Run Protect as a normal node **before** the agent instead. The same applies
-  to Reveal as a tool: whatever it reveals is shown to the model.
+- **AI Agent tools see their results.** If an agent calls Protect as a tool with the map included,
+  `placeholderMap` with the original values goes back into the model's context, which defeats the
+  purpose. See [As an AI Agent tool](#as-an-ai-agent-tool) for the safe settings.
 
 ## How it differs from the Guardrails node
 
 n8n's built-in [Guardrails](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-langchain.guardrails)
-node can sanitize personal data. Its PII check uses regular expressions only, and it masks values
-for good. Anonymizator is for a different job:
+node can sanitize personal data. Its PII check uses regular expressions only and replaces each match
+with a type tag such as `<EMAIL_ADDRESS>`; there is no step that restores the values (the node does
+list the matched originals in its `checks` output). Anonymizator is for a different job:
 
-| | Guardrails (Sanitize) | Anonymizator |
+| | Guardrails (Sanitize Text) | Anonymizator |
 | --- | --- | --- |
-| How data is found | Regular expressions only | Named-entity recognition (NER) for names, locations and similar free text, plus validated recognisers for structured identifiers |
-| Person names | Not detected (no pattern can match a name) | Detected by NER, with extra first-name and surname placeholders |
-| Regional identifiers | A fixed pattern list | Slovenian EMŠO, tax and ZZZS numbers, Croatian OIB, Austrian social insurance number, IBAN and more |
-| Reversible | No, values are masked for good | Yes: pseudonymise, keep the map locally, and Reveal the answer offline. Masking is available too. |
-| Where detection runs | Inside n8n | On the Anonymizator gateway, over an HPKE-encrypted, ranges-only channel; the map never leaves n8n |
+| How data is found | Regular expressions only (its LLM-based checks, such as jailbreak and NSFW, belong to the Check Text for Violations operation and do not redact) | Named-entity recognition (NER) on the gateway for names, locations and similar free text, plus recognisers that validate structured identifiers |
+| Person names | Not detected: none of its 36 built-in types is a name (only a custom regex listing specific names would match) | Detected by NER (statistical, so it can miss one), with extra first-name and surname placeholders |
+| Locations | A street-suffix pattern (`… Street`, `St`, `Ave`, `Rd`, `Dr` …); no cities or countries | Detected by NER |
+| Regional identifiers | 36 fixed, unvalidated patterns (US, UK, ES, IT, PL, SG, AU, IN, FI), no Slovenian, Croatian or Austrian IDs, plus your own custom regex | Slovenian EMŠO, tax and ZZZS numbers, Croatian OIB, Austrian social insurance number, IBAN and more |
+| Reversible | No: every value of a type becomes the same tag (for example `<EMAIL_ADDRESS>`), and there is no restore step | Yes: unique placeholders per value, a placeholder map, and Reveal. Masking is available too. |
+| Where detection runs | Inside n8n | On the Anonymizator gateway, over an HPKE-encrypted channel; the gateway returns positions only |
+| Where the map is made and kept | n/a | Inside n8n: the map, with the real values, is created locally and is part of the Protect output; the gateway never sees or stores it |
 | Browser extension interop | n/a | Shares placeholders and ID files with the Anonymizator Chrome extension |
 
-Guardrails needs no account and sends nothing anywhere; Anonymizator needs an API key and sends the
-(encrypted) text to the gateway for detection. Neither makes text anonymous on its own.
+Guardrails' Sanitize Text needs no account and sends nothing anywhere; its LLM-based checks
+(jailbreak, NSFW, topical alignment and custom checks) are in Check Text for Violations and send the
+text to whichever chat model you connect. Anonymizator needs an API key and sends the encrypted text
+to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Resources
 
 - [n8n community nodes documentation](https://docs.n8n.io/integrations/community-nodes)
 - Anonymizator gateway: `https://anon.prosecco37.com` (sign-in required; API keys come from the
   Anonymizator user portal, see [Credentials](#credentials))
+- [Example workflow: Protect, ask an LLM, Reveal](examples/protect-llm-reveal/README.md)
 - [RFC 9180: Hybrid Public Key Encryption](https://www.rfc-editor.org/rfc/rfc9180)
 - [Changelog](CHANGELOG.md)
+
+## Support
+
+- Bugs and feature requests: [GitHub issues](https://github.com/cbuctok/n8n-nodes-anonymizator/issues).
+- Security issues: report them privately, as described in [SECURITY.md](SECURITY.md).
+- Questions about n8n itself: the [n8n community forum](https://community.n8n.io/).
+- API keys and the gateway: the Prosecco 37 Anonymizator user portal (see [Credentials](#credentials)).
 
 ## Licence
 
@@ -306,5 +438,7 @@ Guardrails needs no account and sends nothing anywhere; Anonymizator needs an AP
 
 ## Version history
 
+- **Unreleased:** **Detect** operation; **Include Placeholder Map** and **Ignore Terms** options;
+  an importable example workflow; documentation of exactly what leaves n8n.
 - **0.1.0** (2026-10-05): first release. Protect and Reveal, four placeholder styles, map
   continuation and sharing across items, extension ID files.

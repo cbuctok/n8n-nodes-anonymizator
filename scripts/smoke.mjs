@@ -356,6 +356,79 @@ await scenario('Reveal with an extension ID file as the map', async () => {
 	}
 });
 
+await scenario('Detect, all types, with values; offsets index the original text', async () => {
+	const text = `😀😀 ${TEXT}`;
+	const [out] = await execute({
+		operation: 'detect',
+		text,
+		detect: 'all',
+		options: { includeValues: true },
+	});
+	show(out);
+	assert.equal(out.hasPersonalData, true);
+	assert.equal(out.entityCount, out.entities.length);
+	const total = Object.values(out.countsByType).reduce((a, b) => a + b, 0);
+	assert.equal(total, out.entityCount);
+	for (const entity of out.entities) {
+		assert.equal(text.slice(entity.start, entity.end), entity.value, `offsets of ${entity.value}`);
+	}
+	const values = out.entities.map((e) => e.value);
+	assert.ok(values.includes(PERSON), 'name detected');
+	assert.ok(values.includes(EMAIL), 'email detected');
+	assert.ok(out.countsByType.PERSON >= 1 && out.countsByType.EMAIL_ADDRESS >= 1);
+});
+
+await scenario('Detect, selected types, no values; nothing found in plain text', async () => {
+	const [out] = await execute({
+		operation: 'detect',
+		text: TEXT,
+		detect: 'selected',
+		entityTypes: ['EMAIL_ADDRESS'],
+		options: {},
+	});
+	show(out);
+	assert.deepEqual(Object.keys(out.countsByType), ['EMAIL_ADDRESS']);
+	assert.ok(!JSON.stringify(out).includes(EMAIL), 'no values without Include Values');
+	const [none] = await execute({
+		operation: 'detect',
+		text: 'The weather is nice today.',
+		detect: 'all',
+		options: {},
+	});
+	show(none);
+	assert.equal(none.hasPersonalData, false);
+	assert.equal(none.entityCount, 0);
+});
+
+await scenario('Ignore Terms: Protect keeps the term, Detect drops it', async () => {
+	const [out] = await execute(protect(TEXT, { options: { ignoreTerms: `janez novak, Other Co` } }));
+	show(out);
+	assert.ok(out.protectedText.includes(PERSON), 'ignored name kept');
+	assert.ok(!out.protectedText.includes(EMAIL), 'email still replaced');
+	assert.ok(!Object.values(out.placeholderMap).includes(PERSON));
+	assertOffsets(out);
+	const [detected] = await execute({
+		operation: 'detect',
+		text: TEXT,
+		detect: 'all',
+		options: { ignoreTerms: PERSON.toUpperCase(), includeValues: true },
+	});
+	show(detected);
+	assert.ok(!detected.entities.some((e) => e.value === PERSON), 'ignored name not reported');
+	assert.ok(detected.entities.some((e) => e.value === EMAIL));
+});
+
+await scenario('Include Placeholder Map off: no map in the output', async () => {
+	const [out] = await execute(protect(TEXT, { options: { includePlaceholderMap: false } }));
+	show(out);
+	assert.equal(out.placeholderMap, undefined);
+	assert.equal(out.idFile, undefined);
+	assert.ok(!JSON.stringify(out).includes(PERSON), 'no real value anywhere in the output');
+	assert.ok(!JSON.stringify(out).includes(EMAIL), 'no real value anywhere in the output');
+	assert.match(out.protectedText, /\[PERSON_[a-z0-9]{5}\]/);
+	assertOffsets(out);
+});
+
 await scenario('Bad API key: friendly rejected-key error, not success', async () => {
 	gateway.clearKeyconfigCache();
 	let caught;

@@ -3,6 +3,20 @@
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Utility", "Development"],
+	"alias": [
+		"PII",
+		"anonymize",
+		"anonymise",
+		"pseudonymize",
+		"pseudonymise",
+		"redact",
+		"mask",
+		"de-identify",
+		"GDPR",
+		"privacy",
+		"personal data",
+		"NER"
+	],
 	"resources": {
 		"credentialDocumentation": [
 			{

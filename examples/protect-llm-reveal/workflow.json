@@ -1,0 +1,213 @@
+{
+	"name": "Protect personal data before an LLM drafts a reply with Anonymizator",
+	"nodes": [
+		{
+			"parameters": {
+				"content": "## Protect personal data before an LLM drafts a reply with Anonymizator\n\n### How it works\n\n1. Starts from a sample support ticket that contains a name, an email address and an IBAN (all synthetic).\n2. Protect sends the encrypted ticket to the Anonymizator gateway, which returns only where the personal data is; the placeholders and the placeholder map are made here in n8n.\n3. The Basic LLM Chain drafts a reply from the protected ticket, so the model only ever sees placeholders such as [PERSON_a7k2q].\n4. Reveal puts the real values back into the draft, locally and without a credential.\n\n### Setup steps\n\n- [ ] Install `n8n-nodes-anonymizator` from **Settings → Community Nodes**.\n- [ ] Add your **Anonymizator API** credential to the *Protect* node.\n- [ ] Add an **OpenAI** credential to the *OpenAI Chat Model* node, or swap in any other chat model.\n- [ ] Replace *Sample Support Ticket* with your trigger and the field that holds the text.\n\n### Customization\n\nChange the instructions in *Draft Reply*, but keep the sentence about placeholders. If you rename *Protect*, update the Placeholder Map expression in *Reveal*. Check `unresolvedPlaceholders` after *Reveal* before sending the reply to a person.",
+				"height": 720,
+				"width": 480
+			},
+			"name": "Overview",
+			"type": "n8n-nodes-base.stickyNote",
+			"typeVersion": 1,
+			"position": [
+				-1120,
+				-400
+			]
+		},
+		{
+			"parameters": {
+				"content": "## Protect the ticket\n\nOnly the encrypted text goes to the gateway. The placeholder map stays in n8n.",
+				"height": 400,
+				"width": 760,
+				"color": 7
+			},
+			"name": "Protect Section",
+			"type": "n8n-nodes-base.stickyNote",
+			"typeVersion": 1,
+			"position": [
+				-600,
+				-192
+			]
+		},
+		{
+			"parameters": {
+				"content": "## Draft, then reveal\n\nThe model sees placeholders only. Reveal restores the values locally.",
+				"height": 560,
+				"width": 784,
+				"color": 7
+			},
+			"name": "Reply Section",
+			"type": "n8n-nodes-base.stickyNote",
+			"typeVersion": 1,
+			"position": [
+				192,
+				-192
+			]
+		},
+		{
+			"parameters": {},
+			"name": "When Clicking ‘Execute Workflow’",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [
+				-480,
+				64
+			]
+		},
+		{
+			"parameters": {
+				"mode": "manual",
+				"includeOtherFields": false,
+				"assignments": {
+					"assignments": [
+						{
+							"id": "ticket-text",
+							"name": "ticket",
+							"value": "Hello, my name is Janez Novak and I was charged twice for invoice 2026-117. Please refund the duplicate to my account SI56 1910 0000 0123 438 and confirm by email to ana.kovac@example.com. Thanks!",
+							"type": "string"
+						}
+					]
+				},
+				"options": {}
+			},
+			"name": "Sample Support Ticket",
+			"type": "n8n-nodes-base.set",
+			"typeVersion": 3.4,
+			"position": [
+				-256,
+				64
+			],
+			"notes": "Synthetic personal data only. Replace with your own source."
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.ticket }}",
+				"options": {}
+			},
+			"name": "Protect",
+			"type": "n8n-nodes-anonymizator.anonymizator",
+			"typeVersion": 1,
+			"position": [
+				-16,
+				64
+			],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "",
+					"name": "Anonymizator API"
+				}
+			},
+			"notes": "Reveal reads this node's placeholderMap by name."
+		},
+		{
+			"parameters": {
+				"promptType": "define",
+				"text": "=You are a customer support assistant. Write a short, friendly reply to the support ticket below.\n\nText in square brackets, such as [PERSON_a7k2q], is a placeholder for personal data. Keep every placeholder exactly as written, including the brackets, and never guess what it stands for.\n\nTicket:\n{{ $json.protectedText }}",
+				"batching": {}
+			},
+			"name": "Draft Reply",
+			"type": "@n8n/n8n-nodes-langchain.chainLlm",
+			"typeVersion": 1.9,
+			"position": [
+				336,
+				64
+			]
+		},
+		{
+			"parameters": {
+				"model": {
+					"__rl": true,
+					"mode": "list",
+					"value": "gpt-5-mini",
+					"cachedResultName": "gpt-5-mini"
+				},
+				"options": {}
+			},
+			"name": "OpenAI Chat Model",
+			"type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+			"typeVersion": 1.3,
+			"position": [
+				336,
+				272
+			]
+		},
+		{
+			"parameters": {
+				"operation": "reveal",
+				"text": "={{ $json.text }}",
+				"placeholderMap": "={{ $('Protect').item.json.placeholderMap }}",
+				"options": {}
+			},
+			"name": "Reveal",
+			"type": "n8n-nodes-anonymizator.anonymizator",
+			"typeVersion": 1,
+			"position": [
+				784,
+				64
+			]
+		}
+	],
+	"connections": {
+		"When Clicking ‘Execute Workflow’": {
+			"main": [
+				[
+					{
+						"node": "Sample Support Ticket",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Sample Support Ticket": {
+			"main": [
+				[
+					{
+						"node": "Protect",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect": {
+			"main": [
+				[
+					{
+						"node": "Draft Reply",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"OpenAI Chat Model": {
+			"ai_languageModel": [
+				[
+					{
+						"node": "Draft Reply",
+						"type": "ai_languageModel",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Draft Reply": {
+			"main": [
+				[
+					{
+						"node": "Reveal",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1",
+		"saveDataSuccessExecution": "none"
+	},
+	"pinData": {}
+}

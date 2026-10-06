@@ -22,6 +22,8 @@ export class AnonymizatorApi implements ICredentialType {
 		'https://github.com/cbuctok/n8n-nodes-anonymizator?tab=readme-ov-file#credentials';
 
 	properties: INodeProperties[] = [
+		// TODO(api-key-portal): once the Anonymizator user portal has a public URL, name it in the
+		// description below (or in a `hint`) so users can find where to create a key.
 		{
 			displayName: 'API Key',
 			name: 'apiKey',

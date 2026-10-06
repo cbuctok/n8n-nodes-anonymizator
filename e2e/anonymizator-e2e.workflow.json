@@ -238,6 +238,60 @@
 			"type": "n8n-nodes-base.code",
 			"typeVersion": 2,
 			"position": [-220, 600]
+		},
+		{
+			"parameters": {
+				"operation": "detect",
+				"text": "={{ $json.text }}",
+				"detect": "selected",
+				"entityTypes": ["PERSON", "EMAIL_ADDRESS"],
+				"options": {
+					"ignoreTerms": "={{ ['Acme', 'janez novak'].join(',') }}",
+					"includeValues": true,
+					"includeInputFields": true
+				}
+			},
+			"id": "an-50-detect",
+			"name": "Detect",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-440, 900],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.text }}",
+				"options": {
+					"includePlaceholderMap": false,
+					"ignoreTerms": "ana.kovac@example.com\nAcme"
+				}
+			},
+			"id": "an-51-protect-no-map",
+			"name": "Protect No Map",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-220, 900],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"jsCode": "const original = $('Sample Text').first().json.text;\nconst d = $('Detect').first().json;\nconst p = $input.first().json;\nconst fail = (m) => { throw new Error('Detect: ' + m); };\nif (d.hasPersonalData !== true) fail('hasPersonalData is not true');\nif (d.text !== original) fail('Include Input Fields did not copy the text field');\nif (d.countsByType.EMAIL_ADDRESS !== 1) fail('expected one email: ' + JSON.stringify(d.countsByType));\nif (d.entityCount !== d.entities.length) fail('entityCount does not match entities');\nconst total = Object.values(d.countsByType).reduce((a, b) => a + b, 0);\nif (total !== d.entityCount) fail('countsByType does not add up');\nfor (const e of d.entities) {\n  if (!['PERSON', 'EMAIL_ADDRESS'].includes(e.entityType)) fail('type outside the selection: ' + e.entityType);\n  if (original.slice(e.start, e.end) !== e.value) fail('offsets do not slice the value of ' + e.entityType);\n}\nif (d.entities.some((e) => e.value === 'Janez Novak')) fail('the ignored name was reported');\nif ('placeholderMap' in p) fail('Include Placeholder Map off still output placeholderMap');\nif ('idFile' in p) fail('Include Placeholder Map off output an idFile');\nif (p.protectedText.includes('Janez Novak')) fail('name still in protectedText');\nif (!p.protectedText.includes('ana.kovac@example.com')) fail('the ignored email was replaced');\nif (!/\\[PERSON_[a-z0-9]{5}\\]/.test(p.protectedText)) fail('no random person placeholder: ' + p.protectedText);\nif (JSON.stringify(p).includes('Janez Novak')) fail('a protected value is in the output');\nreturn [{ json: { ok: true, countsByType: d.countsByType, protectedText: p.protectedText } }];"
+			},
+			"id": "an-52-check",
+			"name": "Check Detect",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [0, 900]
 		}
 	],
 	"connections": {
@@ -272,6 +326,11 @@
 					},
 					{
 						"node": "Protect Typed",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Detect",
 						"type": "main",
 						"index": 0
 					}
@@ -382,6 +441,28 @@
 				[
 					{
 						"node": "Check Shared",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Detect": {
+			"main": [
+				[
+					{
+						"node": "Protect No Map",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect No Map": {
+			"main": [
+				[
+					{
+						"node": "Check Detect",
 						"type": "main",
 						"index": 0
 					}

@@ -99,7 +99,8 @@ function writeVersion(version) {
 /**
  * Inserts a new `## x.y.z - YYYY-MM-DD` section under the `# Changelog` heading. The body is left as
  * an empty bullet on purpose: the notes are the one part of a release that cannot be derived, so the
- * script stops and waits for a person to write them (`waitForNotes`).
+ * script stops and waits for a person to write them (`waitForNotes`). An `## Unreleased` section,
+ * where notes collect between releases, is renamed instead, so its notes become the release's.
  */
 function writeChangelog(version) {
 	const path = resolve(root, 'CHANGELOG.md');
@@ -112,10 +113,37 @@ function writeChangelog(version) {
 		fail(`CHANGELOG.md already has a ${version} section`);
 	}
 
+	// Tolerates `## [Unreleased]`, trailing spaces and CRLF. A heading that mentions Unreleased but
+	// does not match is refused rather than left behind with the notes outside the release section.
+	const unreleased = /^## \[?Unreleased\]?[ \t]*$/im;
+	if (unreleased.test(text.replace(/\r$/gm, ''))) {
+		const lines = text.split('\n');
+		const at = lines.findIndex((line) => unreleased.test(line.replace(/\r$/, '')));
+		lines[at] = `## ${version} - ${today()}${lines[at].endsWith('\r') ? '\r' : ''}`;
+		writeFileSync(path, lines.join('\n'));
+		return;
+	}
+	if (/^##.*unreleased/im.test(text)) {
+		fail(
+			'CHANGELOG.md has an Unreleased heading the script does not recognise; use "## Unreleased"',
+		);
+	}
+
 	const firstEntry = text.indexOf(`\n${heading}`);
 	if (firstEntry === -1) fail('CHANGELOG.md has no previous release section to insert before');
 
 	writeFileSync(path, text.slice(0, firstEntry + 1) + section + text.slice(firstEntry + 1));
+}
+
+/**
+ * Gives the README's "Version history" **Unreleased** bullet the release's version and date, so the
+ * README in the release commit matches the changelog. Without such a bullet nothing changes.
+ */
+function writeReadmeHistory(version) {
+	const path = resolve(root, 'README.md');
+	const text = readFileSync(path, 'utf8');
+	const next = text.replace(/^- \*\*Unreleased:\*\*/m, `- **${version}** (${today()}):`);
+	if (next !== text) writeFileSync(path, next);
 }
 
 function ensureReleasable() {
@@ -204,7 +232,7 @@ async function waitForNotes(version) {
 	if (start === -1 || bullets.length === 0) {
 		fail(
 			`the ${version} section in CHANGELOG.md has no notes; nothing was committed.\n` +
-				'  Undo with: git checkout -- package.json package-lock.json CHANGELOG.md',
+				'  Undo with: git checkout -- package.json package-lock.json CHANGELOG.md README.md',
 		);
 	}
 }
@@ -230,12 +258,13 @@ async function main() {
 
 	writeVersion(next);
 	writeChangelog(next);
+	writeReadmeHistory(next);
 	await waitForNotes(next);
 
 	// `git add` aborts on a path that does not exist, and package-lock.json is not guaranteed to be
-	// tracked. Adding the version and changelog explicitly, then staging whatever else a dependency
-	// bump touched, keeps a missing lockfile from failing the release after the version is written.
-	git('add', 'package.json', 'CHANGELOG.md');
+	// tracked. The version, changelog and README are added explicitly and the lockfile only if it
+	// exists, so a missing lockfile cannot fail the release after the version is written.
+	git('add', 'package.json', 'CHANGELOG.md', 'README.md');
 	try {
 		git('add', 'package-lock.json');
 	} catch {

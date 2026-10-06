@@ -7,6 +7,7 @@ import type {
 } from 'n8n-workflow';
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
+import { detectDescription, executeDetect } from './actions/detect';
 import { createProtectRunState, executeProtect, protectDescription } from './actions/protect';
 import { executeReveal, revealDescription } from './actions/reveal';
 import { errorNode } from './shared/errors';
@@ -34,7 +35,7 @@ export class Anonymizator implements INodeType {
 			{
 				name: 'anonymizatorApi',
 				required: true,
-				displayOptions: { show: { operation: ['protect'] } },
+				displayOptions: { show: { operation: ['protect', 'detect'] } },
 			},
 		],
 		properties: [
@@ -44,6 +45,13 @@ export class Anonymizator implements INodeType {
 				type: 'options',
 				noDataExpression: true,
 				options: [
+					{
+						name: 'Detect',
+						value: 'detect',
+						action: 'Detect personal data',
+						description:
+							'Report what personal data the text contains, without changing it. Useful for routing before an LLM call.',
+					},
 					{
 						name: 'Protect',
 						value: 'protect',
@@ -55,20 +63,21 @@ export class Anonymizator implements INodeType {
 						value: 'reveal',
 						action: 'Reveal text',
 						description:
-							'Put the original values back using a placeholder map. Runs locally, no credential needed.',
+							'Put the original values back using a placeholder map. Runs locally, no credential needed. The output holds the real values.',
 					},
 				],
 				default: 'protect',
 			},
 			{
 				displayName:
-					'Only detection runs on the Anonymizator gateway: it receives the encrypted text, returns ranges and keeps nothing. Placeholders and the map are made here in n8n. n8n saves execution data, including the original text and the map, so restrict saved executions for workflows that protect sensitive text.',
+					'Only detection runs on the Anonymizator gateway: it receives the encrypted text, returns ranges and keeps nothing. Everything else, including placeholders and the map, happens here in n8n. n8n saves execution data, including the original text and the map, so restrict saved executions for workflows that handle sensitive text.',
 				name: 'notice',
 				type: 'notice',
 				default: '',
-				displayOptions: { show: { operation: ['protect'] } },
+				displayOptions: { show: { operation: ['protect', 'detect'] } },
 			},
 			...protectDescription,
+			...detectDescription,
 			...revealDescription,
 		],
 	};
@@ -85,7 +94,9 @@ export class Anonymizator implements INodeType {
 				const results =
 					operation === 'reveal'
 						? await executeReveal.call(this, itemIndex)
-						: await executeProtect.call(this, itemIndex, runState);
+						: operation === 'detect'
+							? await executeDetect.call(this, itemIndex)
+							: await executeProtect.call(this, itemIndex, runState);
 
 				returnData.push(...results);
 			} catch (error) {

@@ -99,10 +99,31 @@ export type IdFileV1 = {
 /** Protect output item json (before optional input fields are merged in). */
 export type ProtectResult = {
 	protectedText: string;
-	placeholderMap: PlaceholderTable;
+	/** Omitted when Include Placeholder Map is off. */
+	placeholderMap?: PlaceholderTable;
 	entities: OutputEntity[];
 	entityFilterIgnored?: true;
 	idFile?: IdFileV1;
+};
+
+/** One entity in the node's Detect output. */
+export type DetectEntity = {
+	entityType: string;
+	/** UTF-16 offsets into the ORIGINAL text (String#slice). */
+	start: number;
+	end: number;
+	score: number;
+	/** The matched text; present only with Include Values. */
+	value?: string;
+};
+
+/** Detect output item json (before optional input fields are merged in). */
+export type DetectResult = {
+	hasPersonalData: boolean;
+	entityCount: number;
+	countsByType: Record<string, number>;
+	entities: DetectEntity[];
+	entityFilterIgnored?: true;
 };
 
 /** Reveal output item json (before optional input fields are merged in). */

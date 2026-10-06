@@ -20,6 +20,14 @@ const PLACEHOLDER_TOKEN_RE = /\[([A-Z][A-Za-z0-9_]*)\]/g;
 
 export const revealDescription: INodeProperties[] = [
 	{
+		displayName:
+			'The output contains the real values. Do not give Reveal to an AI agent as a tool when what the agent produces leaves your control: everything Reveal returns goes back into the model.',
+		name: 'revealNotice',
+		type: 'notice',
+		default: '',
+		displayOptions: showForReveal,
+	},
+	{
 		displayName: 'Text',
 		name: 'text',
 		type: 'string',
@@ -27,7 +35,8 @@ export const revealDescription: INodeProperties[] = [
 		default: '',
 		typeOptions: { rows: 4 },
 		placeholder: 'e.g. Dear [PERSON_a7k2q], your invoice is ready',
-		description: 'The text containing placeholders to reveal',
+		description: 'The text containing placeholders to reveal, usually the answer of the LLM',
+		hint: 'After a Basic LLM Chain the answer is usually {{ $json.text }}; after an AI Agent, {{ $json.output }}',
 		displayOptions: showForReveal,
 	},
 	{
@@ -36,10 +45,10 @@ export const revealDescription: INodeProperties[] = [
 		type: 'json',
 		required: true,
 		default: '{}',
-		placeholder: 'e.g. {{ $("Anonymizator").item.json.placeholderMap }}',
+		placeholder: "e.g. {{ $('Protect').item.json.placeholderMap }}",
 		description:
 			'The map that Protect produced. Accepts a JSON object of placeholders to values (bare or [bracketed] keys), an array of {placeholder, value} objects, or an ID file saved by the Anonymizator browser extension.',
-		hint: 'Reveal runs entirely inside n8n: nothing is sent to the gateway',
+		hint: "Use your Protect node's name, e.g. {{ $('Protect').item.json.placeholderMap }}. Reveal runs entirely inside n8n: nothing is sent to the gateway.",
 		displayOptions: showForReveal,
 	},
 	{
