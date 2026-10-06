@@ -38,7 +38,7 @@ function scannerDir() {
 				'--no-audit',
 				'--no-fund',
 				'--ignore-scripts',
-				'--force',
+				'--loglevel=error',
 				`@n8n/scan-community-package@${SCAN_VERSION}`,
 			],
 			{ stdio: 'inherit' },
