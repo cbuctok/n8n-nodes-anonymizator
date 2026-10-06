@@ -1,0 +1,89 @@
+# Docker-based n8n for developing and testing this community node.
+#
+# Why a container: a local n8n instance accumulates state (cached node definitions, encrypted
+# credentials, saved workflows) that can make a code change look like it did not take effect. A
+# container starts from a known state, so the node under test is always the one in ./dist.
+#
+# Workflow:
+#   npm run build                 compile the node first; n8n loads dist/, not the sources
+#   npm run n8n:up                start n8n and wait until it is healthy
+#   npm run n8n:logs              follow the log
+#   npm run n8n:down              stop, keeping the database
+#   npm run n8n:reset             stop and wipe the database for a completely clean slate
+#
+# The editor is on http://localhost:5678 (owner admin@example.com / AnonymizatorTest123!, created by
+# scripts/e2e-n8n.mjs on a fresh volume).
+
+services:
+  # Links the package into n8n's custom-node folder. This has to run before n8n starts, because n8n
+  # scans that folder only during startup. A one-shot service keeps the n8n container's own
+  # entrypoint untouched.
+  setup:
+    image: docker.n8n.io/n8nio/n8n:2.41.7
+    container_name: n8n-anonymizator-setup
+    restart: 'no'
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        custom=/home/node/.n8n/custom
+        mkdir -p "$$custom/node_modules"
+        ln -sfn /package "$$custom/node_modules/n8n-nodes-anonymizator"
+        chown -R node:node "$$custom"
+        echo "linked /package -> $$custom/node_modules/n8n-nodes-anonymizator"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./dist:/package/dist:ro
+      - ./package.json:/package/package.json:ro
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.41.7
+    container_name: n8n-anonymizator-dev
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    ports:
+      # Loopback only: the instance has a documented owner password and, during e2e, the real API
+      # key as a credential, so it must not be reachable from the rest of the network.
+      - '127.0.0.1:5678:5678'
+    environment:
+      # A fixed key keeps stored credentials readable across restarts. This is a local development
+      # value and must never be reused for anything reachable from outside this machine.
+      N8N_ENCRYPTION_KEY: 'local-dev-only-not-a-real-secret'
+      N8N_SECURE_COOKIE: 'false'
+      N8N_DIAGNOSTICS_ENABLED: 'false'
+      N8N_VERSION_NOTIFICATIONS_ENABLED: 'false'
+      N8N_PERSONALIZATION_ENABLED: 'false'
+      N8N_HIRING_BANNER_ENABLED: 'false'
+      N8N_TEMPLATES_ENABLED: 'false'
+      N8N_COMMUNITY_PACKAGES_ENABLED: 'true'
+      # Reload node definitions on every start, so a rebuilt node is picked up by a restart rather
+      # than needing the container to be recreated.
+      N8N_DEV_RELOAD: 'true'
+      N8N_LOG_LEVEL: 'debug'
+      GENERIC_TIMEZONE: 'UTC'
+      TZ: 'UTC'
+    volumes:
+      # n8n's own data: database, encryption key, config.
+      - n8n_data:/home/node/.n8n
+      # The package itself, as it would be published: only dist/ and package.json. Mounting the whole
+      # repo would also expose .env.dev (the real API key) inside the container. n8n reads the package
+      # through a symlink created by the setup service above, which is how `npm link`-style local
+      # development is normally done.
+      - ./dist:/package/dist:ro
+      - ./package.json:/package/package.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget --spider -q http://localhost:5678/healthz/readiness || exit 1'
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+
+
+volumes:
+  n8n_data:

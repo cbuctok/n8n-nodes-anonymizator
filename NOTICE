@@ -1,0 +1,20 @@
+n8n-nodes-anonymizator
+Copyright 2026 Greg Evseev
+
+This package is licensed under the MIT licence (see LICENSE.md).
+
+Portions of this package are ported from the Anonymizator browser extension,
+Copyright 2026 Prosecco 37 d.o.o., and are contributed under the MIT licence
+with the permission of Prosecco 37 d.o.o. The ported portions are:
+
+- the substitution engine (placeholder allocation, PERSON name sub-placeholders,
+  masking and reveal), from lib/anonymizer.js and lib/id-set.js, in
+  nodes/Anonymizator/shared/anonymizer.ts;
+- the HPKE (RFC 9180) request sealing and wire format, from lib/hpke.js, in
+  nodes/Anonymizator/shared/hpke.ts;
+- the gateway client logic (keyconfig verification, sealed analyze requests,
+  status handling), from lib/gateway.js, in nodes/Anonymizator/shared/gateway.ts
+  and nodes/Anonymizator/shared/keyconfig.ts;
+- the entity catalog, from lib/entities.js, in nodes/Anonymizator/shared/entities.ts;
+- the ID file format and its parse rules, from sidepanel/sidepanel-idfile.js, in
+  nodes/Anonymizator/shared/placeholderMap.ts.

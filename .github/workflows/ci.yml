@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+# Cancel in-progress runs for the same branch/PR to avoid wasting CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      # Builds first, then runs test/*.test.mjs against dist/. Offline: the gateway is faked. Cases
+      # that compare against the browser extension's sources are skipped, since that checkout is
+      # not available here.
+      - name: Run unit tests
+        run: npm test
+
+      - name: Check node fields
+        run: npm run check:fields
+
+      # n8n's verification scanner on the source and on the packed tarball. Stricter than local lint
+      # (newer rules, ignores eslint-disable). Installs the scanner from the npm registry.
+      - name: Run the verification scanner
+        run: npm run scan

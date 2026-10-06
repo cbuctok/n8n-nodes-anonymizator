@@ -1,0 +1,124 @@
+# Stages a release of this n8n community node package on npm whenever a version
+# tag is pushed.
+#
+# Staging, not publishing: the tarball is uploaded with a provenance attestation
+# and then waits. Nothing becomes installable until a maintainer approves the
+# staged version on npmjs.com. This keeps releases verifiable while ensuring a
+# bad tag cannot put a broken package in front of users on its own.
+#
+# Starting May 1 2026, n8n requires all community nodes to be published via
+# GitHub Actions with npm provenance statements. This workflow satisfies that
+# requirement. Provenance lets anyone cryptographically verify that a package
+# was built by this exact workflow, from this exact repository and commit.
+#
+# ─── PREREQUISITES ─────────────────────────────────────────────────────────────
+#
+# npm ≥ 11.15 for `npm stage`. Check both this project's and the runner's:
+#
+#   npm --version
+#
+# ─── ONE-TIME SETUP ────────────────────────────────────────────────────────────
+#
+# OIDC Trusted Publishing (no long-lived secrets):
+#   1. Log in to npmjs.com and open your package's settings.
+#   2. Under "Publish access" → "Trusted Publishers", click "Add a publisher".
+#   3. Select GitHub Actions and fill in:
+#        Repository owner: cbuctok
+#        Repository name:  n8n-nodes-anonymizator
+#        Workflow name:    publish.yml
+#        Environment:      (leave blank — this job declares no environment)
+#   4. Enable BOTH "Allow npm stage publish" and "Allow npm publish". The second
+#      looks redundant for a staged-only workflow but is not: uploading to the
+#      staging area is itself a publish operation, and without it the OIDC
+#      exchange succeeds and the upload is rejected with
+#      "OIDC permission denied for this action".
+#   5. Leave the NPM_TOKEN secret unset in this repository. GitHub's OIDC
+#      token is used instead — no secret ever touches your repo settings.
+#
+# A package that does not exist on npm yet cannot have a trusted publisher.
+# The very first version may have to be published by hand (see AGENTS.md).
+#
+# ─── TAG CONVENTION ────────────────────────────────────────────────────────────
+#
+# This workflow triggers on tags matching "*.*.*" (e.g. 0.2.0).
+# If you prefer tags with a "v" prefix (e.g. v0.2.0), change the filter to:
+#   tags: ['v*.*.*']
+#
+# ─── RELEASE PROCESS ───────────────────────────────────────────────────────────
+#
+#   npm run release        # lint, test, scan, prompt for a version bump, commit, tag, push
+#
+# The tag push triggers this workflow, which stages the package on npm. Finish by
+# approving the staged version:
+#
+#   npmjs.com → the package → Staged versions → Approve
+#
+# Until that approval happens the version is not installable and `latest` does
+# not move.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      # Matches 0.1.0, 1.2.3, 2.0.0-rc.1, etc.
+      # See "TAG CONVENTION" above if you prefer tags with a "v" prefix.
+      - '*.*.*'
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Required to mint an OIDC token for npm provenance attestation.
+      id-token: write
+      # Scoped down from the default (write) for least-privilege publishing.
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The same gates as ci.yml, repeated here because the tagged commit is what
+      # ships. `npm test` also builds dist/, which the scan and the upload use.
+      # The scanner is the check n8n's verification runs, so a release that fails
+      # it must not reach npm.
+      - name: Lint, test and scan
+        run: |
+          npm run lint
+          npm test
+          npm run check:fields
+          npm run scan
+
+      - name: Stage the release
+        # Uploads the tarball with a provenance attestation and stops there. Nothing
+        # becomes installable until a maintainer approves the staged version on
+        # npmjs.com, so a bad tag cannot ship a broken package by itself.
+        #
+        # `n8n-node release` is deliberately not used here: in CI it calls
+        # `npm publish`, which would go live immediately and cannot be redirected to
+        # the staging endpoint. The checks above are run explicitly instead.
+        #
+        # Requires the trusted publisher to have BOTH `npm stage publish` and
+        # `npm publish` allowed — staged uploads are a publish operation.
+        #
+        # RELEASE_MODE satisfies the `prepublishOnly` guard. That hook runs
+        # `n8n-node prerelease`, which exits non-zero unless this variable is set,
+        # to stop anyone publishing by hand instead of cutting a release. Here the
+        # release has already been cut by the tag, so the guard is told to stand
+        # down rather than removed.
+        run: |
+          npm run build
+          npm stage publish --provenance --access public
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          RELEASE_MODE: 'true'

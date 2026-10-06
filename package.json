@@ -1,0 +1,65 @@
+{
+	"name": "n8n-nodes-anonymizator",
+	"version": "0.1.0",
+	"description": "Protect personal data in text before it reaches an LLM: replace names, emails, IBANs and other identifiers with placeholders through the Anonymizator privacy gateway, and reveal them again offline.",
+	"license": "MIT",
+	"homepage": "https://github.com/cbuctok/n8n-nodes-anonymizator",
+	"keywords": [
+		"n8n-community-node-package",
+		"anonymization",
+		"pii",
+		"privacy",
+		"gdpr",
+		"pseudonymization"
+	],
+	"author": {
+		"name": "Greg Evseev",
+		"email": "greg@digitaliziran.si"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/cbuctok/n8n-nodes-anonymizator.git"
+	},
+	"scripts": {
+		"build": "n8n-node build",
+		"build:watch": "tsc --watch",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"check:fields": "node scripts/check-node-fields.mjs",
+		"smoke": "node scripts/smoke.mjs",
+		"scan": "node scripts/scan.mjs",
+		"test": "npm run build && node --test test/",
+		"e2e": "node scripts/e2e-n8n.mjs",
+		"n8n:up": "docker compose up -d --wait",
+		"n8n:logs": "docker compose logs -f n8n",
+		"n8n:down": "docker compose down",
+		"n8n:reset": "docker compose down -v && docker compose up -d --wait",
+		"release": "node scripts/release.mjs",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist",
+		"NOTICE"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/AnonymizatorApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Anonymizator/Anonymizator.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "^0.48.4",
+		"@types/node": "18.19.130",
+		"eslint": "9.39.4",
+		"prettier": "^3.9.7",
+		"typescript": "5.9.3"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	}
+}

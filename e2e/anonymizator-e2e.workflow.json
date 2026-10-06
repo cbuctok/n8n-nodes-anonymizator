@@ -1,0 +1,396 @@
+{
+	"name": "Anonymizator — End to End",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "an-01-trigger",
+			"name": "Start",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [-900, 0],
+			"notes": "Run this workflow to exercise every branch. Each Check node throws when its branch is wrong."
+		},
+		{
+			"parameters": {
+				"mode": "manual",
+				"includeOtherFields": false,
+				"assignments": {
+					"assignments": [
+						{
+							"id": "a1",
+							"name": "text",
+							"value": "Dear support, my name is Janez Novak and my email is ana.kovac@example.com. Please refund the invoice to IBAN SI56 1910 0000 0123 438. Thank you!",
+							"type": "string"
+						}
+					]
+				}
+			},
+			"id": "an-02-sample",
+			"name": "Sample Text",
+			"type": "n8n-nodes-base.set",
+			"typeVersion": 3.4,
+			"position": [-680, 0],
+			"notes": "Synthetic personal data only."
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.text }}",
+				"options": {}
+			},
+			"id": "an-10-protect",
+			"name": "Protect",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-440, -300],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"operation": "reveal",
+				"text": "={{ $json.protectedText }}",
+				"placeholderMap": "={{ $('Protect').item.json.placeholderMap }}",
+				"options": {}
+			},
+			"id": "an-11-reveal",
+			"name": "Reveal",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [0, -300]
+		},
+		{
+			"parameters": {
+				"operation": "reveal",
+				"text": "={{ $json.protectedText }}",
+				"placeholderMap": "={{ JSON.stringify($json.placeholderMap) }}",
+				"options": {
+					"includeInputFields": true
+				}
+			},
+			"id": "an-12-reveal-string",
+			"name": "Reveal String Map",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-220, -300]
+		},
+		{
+			"parameters": {
+				"jsCode": "const original = $('Sample Text').first().json.text;\nconst p = $('Protect').first().json;\nconst s = $('Reveal String Map').first().json;\nconst r = $input.first().json;\nconst fail = (m) => { throw new Error('Round trip: ' + m); };\nif (typeof p.protectedText !== 'string') fail('no protectedText');\nif (p.protectedText.includes('ana.kovac@example.com')) fail('email still in protectedText');\nif (p.protectedText.includes('Janez Novak')) fail('name still in protectedText');\nif (!/\\[EMAIL_ADDRESS_[a-z0-9]{5}\\]/.test(p.protectedText)) fail('no random email placeholder: ' + p.protectedText);\nif (!Array.isArray(p.entities) || p.entities.length < 2) fail('expected at least 2 entities');\nfor (const e of p.entities) {\n  if (p.protectedText.slice(e.start, e.end) !== e.placeholder) fail('entity offsets do not point at ' + e.placeholder);\n}\nif (Object.keys(p.placeholderMap).length < 2) fail('placeholderMap too small');\nif ('entityFilterIgnored' in p) fail('entityFilterIgnored present without a filter');\nif (r.revealedText !== original) fail('Reveal did not restore the original text');\nif (r.unresolvedPlaceholders.length !== 0) fail('unresolved: ' + r.unresolvedPlaceholders.join(', '));\nif (s.revealedText !== original) fail('Reveal String Map did not restore the original text');\nif (s.protectedText !== p.protectedText) fail('Include Input Fields did not copy the input item');\nreturn [{ json: { check: 'round trip', ok: true, entities: p.entities.length, protectedText: p.protectedText } }];"
+			},
+			"id": "an-13-check",
+			"name": "Check Round Trip",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [220, -300]
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.text }}",
+				"detect": "selected",
+				"entityTypes": ["PERSON", "EMAIL_ADDRESS"],
+				"placeholderStyle": "sequential",
+				"options": {
+					"includeIdFile": true,
+					"includeInputFields": true
+				}
+			},
+			"id": "an-20-protect-selected",
+			"name": "Protect Selected",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-440, 0],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"operation": "reveal",
+				"text": "={{ $json.protectedText }}",
+				"placeholderMap": "={{ $json.idFile }}",
+				"options": {}
+			},
+			"id": "an-21-reveal-idfile",
+			"name": "Reveal From ID File",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-220, 0]
+		},
+		{
+			"parameters": {
+				"text": "={{ 'Copy ana.kovac@example.com and petra.zupan@example.com on the reply to ' + $('Protect Selected').item.json.protectedText }}",
+				"detect": "selected",
+				"entityTypes": ["EMAIL_ADDRESS"],
+				"placeholderStyle": "sequential",
+				"options": {
+					"existingPlaceholderMap": "={{ $('Protect Selected').item.json.placeholderMap }}"
+				}
+			},
+			"id": "an-22-protect-continue",
+			"name": "Protect Continue",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [0, 0],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"jsCode": "const original = $('Sample Text').first().json.text;\nconst p = $('Protect Selected').first().json;\nconst r = $('Reveal From ID File').first().json;\nconst c = $input.first().json;\nconst fail = (m) => { throw new Error('Selected: ' + m); };\nif (p.text !== original) fail('Include Input Fields did not copy the text field');\nif (!p.protectedText.includes('[EMAIL_ADDRESS_1]')) fail('no sequential email placeholder: ' + p.protectedText);\nif (p.placeholderMap.EMAIL_ADDRESS_1 !== 'ana.kovac@example.com') fail('map does not hold EMAIL_ADDRESS_1');\nif (p.entities.some((e) => !['PERSON', 'EMAIL_ADDRESS'].includes(e.entityType))) fail('entity outside the selection: ' + JSON.stringify(p.entities));\nif (!p.idFile || p.idFile.format !== 'anonymizator-id-file' || p.idFile.version !== 1) fail('idFile missing or wrong format');\nif (p.idFile.numbering !== 'sequential') fail('idFile numbering is ' + p.idFile.numbering);\nif (r.revealedText !== original) fail('Reveal From ID File did not restore the original text');\nif (!c.protectedText.startsWith('Copy [EMAIL_ADDRESS_1] and [EMAIL_ADDRESS_2] ')) fail('continued map did not reuse/continue: ' + c.protectedText);\nif (c.placeholderMap.EMAIL_ADDRESS_2 !== 'petra.zupan@example.com') fail('continued map lacks EMAIL_ADDRESS_2');\nif (c.placeholderMap.EMAIL_ADDRESS_1 !== 'ana.kovac@example.com') fail('continued map lost EMAIL_ADDRESS_1');\nreturn [{ json: { check: 'selected + sequential + id file + continue', ok: true, protectedText: p.protectedText, continued: c.protectedText } }];"
+			},
+			"id": "an-23-check",
+			"name": "Check Selected",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [220, 0]
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.text }}",
+				"placeholderStyle": "typed",
+				"options": {
+					"includeIdFile": true
+				}
+			},
+			"id": "an-30-protect-typed",
+			"name": "Protect Typed",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-440, 300],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"operation": "reveal",
+				"text": "={{ $json.protectedText }}",
+				"placeholderMap": "={{ $json.placeholderMap }}",
+				"options": {}
+			},
+			"id": "an-31-reveal-typed",
+			"name": "Reveal Typed",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-220, 300]
+		},
+		{
+			"parameters": {
+				"jsCode": "const p = $('Protect Typed').first().json;\nconst r = $input.first().json;\nconst fail = (m) => { throw new Error('Typed: ' + m); };\nif (Object.keys(p.placeholderMap).length !== 0) fail('typed style must return an empty map');\nif ('idFile' in p) fail('typed style must not return an idFile');\nif (!p.protectedText.includes('[EMAIL_ADDRESS]')) fail('no [EMAIL_ADDRESS] mask: ' + p.protectedText);\nif (p.protectedText.includes('ana.kovac@example.com')) fail('email still present');\nif (r.revealedText !== p.protectedText) fail('reveal with an empty map changed the text');\nif (!r.unresolvedPlaceholders.includes('[EMAIL_ADDRESS]')) fail('masks not listed as unresolved');\nreturn [{ json: { check: 'typed', ok: true, protectedText: p.protectedText } }];"
+			},
+			"id": "an-32-check",
+			"name": "Check Typed",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [0, 300]
+		},
+		{
+			"parameters": {
+				"jsCode": "return [\n  { json: { text: 'Hello, my email is ana.kovac@example.com and I need help.' } },\n  { json: { text: 'Please write back to ana.kovac@example.com or petra.zupan@example.com.' } },\n];"
+			},
+			"id": "an-40-two-items",
+			"name": "Two Items",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [-680, 600]
+		},
+		{
+			"parameters": {
+				"text": "={{ $json.text }}",
+				"detect": "selected",
+				"entityTypes": ["EMAIL_ADDRESS"],
+				"options": {
+					"shareMapAcrossItems": true
+				}
+			},
+			"id": "an-41-protect-shared",
+			"name": "Protect Shared",
+			"type": "CUSTOM.anonymizator",
+			"typeVersion": 1,
+			"position": [-440, 600],
+			"credentials": {
+				"anonymizatorApi": {
+					"id": "REPLACED_BY_E2E_SCRIPT",
+					"name": "Anonymizator API"
+				}
+			}
+		},
+		{
+			"parameters": {
+				"jsCode": "const items = $input.all().map((i) => i.json);\nconst fail = (m) => { throw new Error('Shared: ' + m); };\nif (items.length !== 2) fail('expected 2 items, got ' + items.length);\nconst key = (m) => Object.keys(m).find((k) => m[k] === 'ana.kovac@example.com');\nconst k1 = key(items[0].placeholderMap);\nconst k2 = key(items[1].placeholderMap);\nif (!k1 || k1 !== k2) fail('the same email got different placeholders: ' + k1 + ' / ' + k2);\nif (!items[1].protectedText.includes('[' + k1 + ']')) fail('second item does not use ' + k1);\nif (Object.keys(items[1].placeholderMap).length !== 2) fail('second map should hold both emails');\nreturn [{ json: { check: 'shared map', ok: true, placeholder: k1 } }];"
+			},
+			"id": "an-42-check",
+			"name": "Check Shared",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [-220, 600]
+		}
+	],
+	"connections": {
+		"Start": {
+			"main": [
+				[
+					{
+						"node": "Sample Text",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Two Items",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Sample Text": {
+			"main": [
+				[
+					{
+						"node": "Protect",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Protect Selected",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Protect Typed",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect": {
+			"main": [
+				[
+					{
+						"node": "Reveal String Map",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Reveal String Map": {
+			"main": [
+				[
+					{
+						"node": "Reveal",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Reveal": {
+			"main": [
+				[
+					{
+						"node": "Check Round Trip",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect Selected": {
+			"main": [
+				[
+					{
+						"node": "Reveal From ID File",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Reveal From ID File": {
+			"main": [
+				[
+					{
+						"node": "Protect Continue",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect Continue": {
+			"main": [
+				[
+					{
+						"node": "Check Selected",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect Typed": {
+			"main": [
+				[
+					{
+						"node": "Reveal Typed",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Reveal Typed": {
+			"main": [
+				[
+					{
+						"node": "Check Typed",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Two Items": {
+			"main": [
+				[
+					{
+						"node": "Protect Shared",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Protect Shared": {
+			"main": [
+				[
+					{
+						"node": "Check Shared",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}
