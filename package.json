@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-anonymizator",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Protect personal data in text before it reaches an LLM: replace names, emails, IBANs and other identifiers with placeholders through the Anonymizator privacy gateway, and reveal them again offline.",
 	"license": "MIT",
 	"homepage": "https://github.com/cbuctok/n8n-nodes-anonymizator",

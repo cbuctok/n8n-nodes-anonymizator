@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-10-06
 
 - Added the **Detect** operation: it runs the same gateway detection as **Protect** without changing
   the text and returns `hasPersonalData`, `entityCount`, `countsByType` and the entities with

@@ -438,7 +438,7 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
-- **Unreleased:** **Detect** operation; **Include Placeholder Map** and **Ignore Terms** options;
+- **0.1.1** (2026-10-06): **Detect** operation; **Include Placeholder Map** and **Ignore Terms** options;
   an importable example workflow; documentation of exactly what leaves n8n.
 - **0.1.0** (2026-10-05): first release. Protect and Reveal, four placeholder styles, map
   continuation and sharing across items, extension ID files.
