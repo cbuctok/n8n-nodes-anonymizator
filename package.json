@@ -29,7 +29,7 @@
 		"check:fields": "node scripts/check-node-fields.mjs",
 		"smoke": "node scripts/smoke.mjs",
 		"scan": "node scripts/scan.mjs",
-		"test": "npm run build && node --test test/",
+		"test": "npm run build && node --test \"test/*.test.mjs\"",
 		"e2e": "node scripts/e2e-n8n.mjs",
 		"n8n:up": "docker compose up -d --wait",
 		"n8n:logs": "docker compose logs -f n8n",

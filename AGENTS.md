@@ -55,7 +55,7 @@ All node tooling goes through `@n8n/node-cli` (`n8n-node`), exposed as npm scrip
 | `npm run build` | `n8n-node build`: clears `dist`, runs `tsc`, copies icons. |
 | `npm run build:watch` | Raw `tsc --watch`. Does **not** copy icons, so they go missing in `dist/`. |
 | `npm run dev` | `n8n-node dev`. Not used in this repo's workflow; Docker is (below). |
-| `npm test` | `npm run build && node --test test/`. Unit tests against `dist/`, no network. |
+| `npm test` | `npm run build && node --test "test/*.test.mjs"`. Unit tests against `dist/`, no network. |
 | `npm run check:fields` | `fixedCollection` consistency check (the node has none today; kept as a guard). |
 | `npm run scan` | n8n's verification scanner on the source and on the packed tarball. **The real gate.** Needs `dist/`. |
 | `npm run smoke` | Drives the built node against the live production gateway, without n8n. Needs the API key. |
@@ -162,7 +162,7 @@ entities and placeholder-map tests, `ANON_EXT_DIR` overrides the location, and i
 `ANON_EXT_DIR=/path/to/anonymizator-chrome/anonymizator-chrome-ext npm test`). The HPKE and keyconfig
 tests use the fixed repo-root path. A wrong path makes these tests **skip, not fail**, which looks
 like a pass: when checking for drift, look for `# SKIP extension checkout not found` in the output
-(`node --test --test-reporter=tap test/`). In CI they are reported as skipped too.
+(`node --test --test-reporter=tap "test/*.test.mjs"`). In CI they are reported as skipped too.
 
 **Tests live in `test/`, never under `nodes/`.** `nodes/` is compiled, shipped and scanned:
 `no-dead-files` would flag test files there and `no-hardcoded-secrets` would trip on the RFC vectors
