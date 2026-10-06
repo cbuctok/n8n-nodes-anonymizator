@@ -120,11 +120,11 @@ enabled; without the second the OIDC exchange succeeds and the upload fails with
 denied for this action". n8n requires community nodes to be published from GitHub Actions with
 provenance since 1 May 2026.
 
-npm only lets you add a trusted publisher to a package that already exists. Judgment's first version
-was therefore published by hand while trusted publishing was set up. To do the same here, run the
-full check chain, then `RELEASE_MODE=true npm publish --access public` from a clean checkout of the
-tag (the variable satisfies the `prepublishOnly` guard; do not delete the guard). That version has no
-provenance, so submit a later, CI-staged version for verification.
+**Publishing goes through GitHub Actions only.** Never run `npm publish` or `npm stage publish` by
+hand. The single exception is already spent: npm only lets you add a trusted publisher to a package
+that already exists, so `0.1.0` was published by hand on 2026-10-06 from a clean clone of tag `0.1.0`
+(`6c6f86b`). It has no provenance attestation, so submit a later, CI-staged version for n8n
+verification, never `0.1.0`.
 
 CI (`ci.yml`) runs on pull requests and on pushes to `master`: `npm ci`, lint, `npm test`,
 `check:fields`, `npm run scan`. The scan step installs the scanner from the npm registry, which the
