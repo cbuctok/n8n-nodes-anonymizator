@@ -74,6 +74,7 @@ All node tooling goes through `@n8n/node-cli` (`n8n-node`), exposed as npm scrip
 | `npm test` | `npm run build && node --test "test/*.test.mjs"`. Unit tests against `dist/`, no network. |
 | `npm run check:fields` | `fixedCollection` consistency check (the node has none today; kept as a guard). |
 | `npm run scan` | n8n's verification scanner on the source and on the packed tarball. **The real gate.** Needs `dist/`. |
+| `npm run sbom` | `scripts/sbom.sh`: trivy SBOMs (SPDX + CycloneDX) of `package-lock.json` into the gitignored `sbom/`. Dev toolchain only; the published package has no runtime dependencies. Needs trivy. |
 | `npm run smoke` | Drives the built node against the live production gateway, without n8n. Needs the API key. |
 | `npm run e2e` | Drives the built node through a real n8n in Docker. Needs the API key and `n8n:up`. |
 | `npm run n8n:up` / `n8n:logs` / `n8n:down` | Start (and wait for healthy), follow and stop the Docker n8n. |
