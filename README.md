@@ -476,7 +476,7 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
-- **0.1.2** (2026-10-22): brought in line with the Anonymizator browser extension 2026.10.19.1: the
+- **Unreleased:** brought in line with the Anonymizator browser extension 2026.10.19.1: the
   gateway's protocol version 2, the entity type list from the gateway's signed capabilities, the
   extension's placeholder prefixes and company names, **Additionally Protect** and **Include
   Possible IDs** options, ID file version 2, the extension's error wording.

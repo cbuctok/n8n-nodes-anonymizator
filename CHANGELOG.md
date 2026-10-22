@@ -1,8 +1,11 @@
 # Changelog
 
-## 0.1.2 - 2026-10-22
+## Unreleased
 
 Brought in line with the Anonymizator browser extension 2026.10.19.1, as listed below.
+
+The `0.1.2` tag was created by mistake: a bug in the release script turned the chosen minor bump
+into a patch bump. 0.1.2 was never published to npm; this release contains its changes.
 
 ### Added
 

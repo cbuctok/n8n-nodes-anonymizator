@@ -191,8 +191,10 @@ function ask(question) {
 	const readline = createInterface({ input: process.stdin, output: process.stdout });
 	return new Promise((done) => {
 		readline.question(question, (reply) => {
-			readline.close();
+			// Resolve before closing: close() emits 'close' synchronously, and its empty answer would
+			// otherwise win, so every choice fell back to the default.
 			done(reply);
+			readline.close();
 		});
 		readline.on('close', () => done(''));
 	});
