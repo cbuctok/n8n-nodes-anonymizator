@@ -1,225 +1,258 @@
-// Keyconfig signature verification and structural validation, against dist/.
-// A fresh Ed25519 root is generated in-test; the production root must reject its signatures.
+// Keyconfig v2 tests against the compiled dist/ output: every keyconfig case of the gateway's
+// vectors (test/fixtures/pgw-v2.json), the pinned roots, and a differential run against the
+// extension's real lib/hpke.js verifyKeyconfigV2 when its checkout is present.
 import assert from 'node:assert/strict';
-import { createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { describe, it } from 'node:test';
 
+import {
+	EXT_SKIP,
+	VECTORS,
+	ascii,
+	b64url,
+	ed25519Signer,
+	extPinnedRoots,
+	hex,
+	loadExtHpke,
+	makeTrustChain,
+	x25519Raw,
+} from './helpers/pgw.mjs';
+
 const require = createRequire(import.meta.url);
 const K = require('../dist/nodes/Anonymizator/shared/keyconfig.js');
-const { GatewayError } = require('../dist/nodes/Anonymizator/shared/errors.js');
 
-const EXT = '/Users/greg/Repos/projects/prosecco37/anonymizator-chrome';
+const NOW = VECTORS.now;
+const PRIMARY = VECTORS.roots.primary.public_key;
+const BACKUP = VECTORS.roots.backup.public_key;
+const V1_ROOT = 'LuE5xR_dLWJhv1BAULCmpijiAV08ceZTeCSkBYLg-bc';
+const AUD = 'anon.prosecco37.com';
 
-function ed25519Root() {
-	const pair = generateKeyPairSync('ed25519');
-	const spki = pair.publicKey.export({ format: 'der', type: 'spki' });
-	return {
-		root: Buffer.from(spki.subarray(spki.length - 32)).toString('base64url'),
-		privateKey: pair.privateKey,
-	};
+function strip(result) {
+	if (!result.ok) return { ok: false, error: result.error };
+	return { ok: true, keyId: result.keyId };
 }
 
-function x25519PublicB64url() {
-	const pair = generateKeyPairSync('x25519');
-	const spki = pair.publicKey.export({ format: 'der', type: 'spki' });
-	return Buffer.from(spki.subarray(spki.length - 32)).toString('base64url');
-}
-
-function canonical(keys) {
-	const sorted = [...keys].sort((a, b) => a.key_id - b.key_id);
-	return 'pgw-keyconfig-v1\n' + sorted.map((k) => `${k.key_id}:${k.public_key}\n`).join('');
-}
-
-function signedConfig(privateKey, keys) {
-	return {
-		version: 1,
-		keys,
-		sig_alg: 'ed25519-v1',
-		signature: sign(null, Buffer.from(canonical(keys), 'utf8'), privateKey).toString('base64url'),
-	};
-}
-
-const SUITE = { kem: 32, kdf: 1, aead: 2 };
-const entry = (key_id, public_key = x25519PublicB64url()) => ({
-	key_id,
-	public_key,
-	suite: { ...SUITE },
-	not_after: '2030-01-01T00:00:00Z',
-});
-
-describe('constants', () => {
-	it('frozen label, algorithm and suite', () => {
-		assert.equal(K.KEYCONFIG_LABEL, 'pgw-keyconfig-v1\n');
-		assert.equal(K.SIG_ALG, 'ed25519-v1');
-		assert.deepEqual({ ...K.EXPECTED_SUITE }, SUITE);
-		assert.equal(K.TRUST_ROOT_B64URL, 'LuE5xR_dLWJhv1BAULCmpijiAV08ceZTeCSkBYLg-bc');
-	});
-
-	it(
-		'trust root matches the extension',
-		{ skip: !existsSync(`${EXT}/anonymizator-chrome-ext/lib/constants.js`) },
-		() => {
-			const src = readFileSync(`${EXT}/anonymizator-chrome-ext/lib/constants.js`, 'utf8');
-			assert.ok(src.includes(`'${K.TRUST_ROOT_B64URL}'`));
-		},
-	);
-});
-
-describe('buildKeyconfigMessage', () => {
-	it('sorts by numeric key_id and keeps public_key verbatim', () => {
-		const msg = K.buildKeyconfigMessage([
-			{ key_id: 10, public_key: 'b' },
-			{ key_id: 9, public_key: 'a_-' },
-			{ key_id: 100, public_key: 'c' },
-		]);
-		assert.ok(Buffer.isBuffer(msg));
-		assert.equal(msg.toString('utf8'), 'pgw-keyconfig-v1\n9:a_-\n10:b\n100:c\n');
-	});
-
-	it('does not reorder the caller array', () => {
-		const keys = [
-			{ key_id: 2, public_key: 'x' },
-			{ key_id: 1, public_key: 'y' },
-		];
-		K.buildKeyconfigMessage(keys);
-		assert.deepEqual(
-			keys.map((k) => k.key_id),
-			[2, 1],
-		);
-	});
-});
-
-describe('verifyKeyconfig', () => {
-	const { root, privateKey } = ed25519Root();
-	const keys = [entry(8), entry(3)];
-	const good = signedConfig(privateKey, keys);
-
-	it('accepts a config signed by the injected root', () => {
-		assert.equal(K.verifyKeyconfig(good, root), true);
-	});
-
-	it('the production root rejects a test-root signature', () => {
-		assert.equal(K.verifyKeyconfig(good), false);
-	});
-
-	it('rejects a public_key swapped after signing', () => {
-		const tampered = structuredClone(good);
-		tampered.keys[0].public_key = x25519PublicB64url();
-		assert.equal(K.verifyKeyconfig(tampered, root), false);
-	});
-
-	it('rejects a key_id changed after signing', () => {
-		const tampered = structuredClone(good);
-		tampered.keys[1].key_id = 4;
-		assert.equal(K.verifyKeyconfig(tampered, root), false);
-	});
-
-	it('rejects an added key', () => {
-		const tampered = structuredClone(good);
-		tampered.keys.push(entry(99));
-		assert.equal(K.verifyKeyconfig(tampered, root), false);
-	});
-
-	it('rejects a wrong or missing sig_alg', () => {
-		assert.equal(K.verifyKeyconfig({ ...good, sig_alg: 'ed25519' }, root), false);
-		const { sig_alg: _unused, ...noAlg } = good;
-		assert.equal(K.verifyKeyconfig(noAlg, root), false);
-	});
-
-	it('rejects a missing, empty or malformed signature', () => {
-		const { signature: _unused, ...noSig } = good;
-		assert.equal(K.verifyKeyconfig(noSig, root), false);
-		assert.equal(K.verifyKeyconfig({ ...good, signature: '' }, root), false);
-		assert.equal(K.verifyKeyconfig({ ...good, signature: 'not base64!' }, root), false);
-		assert.equal(
-			K.verifyKeyconfig({ ...good, signature: good.signature.slice(0, 40) }, root),
-			false,
-		);
-		const flipped = Buffer.from(good.signature, 'base64url');
-		flipped[0] ^= 1;
-		assert.equal(
-			K.verifyKeyconfig({ ...good, signature: flipped.toString('base64url') }, root),
-			false,
-		);
-	});
-
-	it('never throws on malformed input', () => {
-		for (const bad of [
-			null,
-			undefined,
-			1,
-			'x',
-			[],
-			{},
-			{ keys: 'x' },
-			{ ...good, keys: [] },
-			{ ...good, keys: [null] },
-			{ ...good, keys: [{ key_id: '1', public_key: 'x' }] },
-		]) {
-			assert.equal(K.verifyKeyconfig(bad, root), false);
+describe('pinned roots', () => {
+	it('two roots, never the v1 root, never a test-vector root', () => {
+		assert.equal(K.TRUST_ROOTS_B64URL.length, 2);
+		for (const root of K.TRUST_ROOTS_B64URL) {
+			assert.match(root, /^[A-Za-z0-9_-]{43}$/);
+			assert.notEqual(root, V1_ROOT);
+			assert.notEqual(root, PRIMARY);
+			assert.notEqual(root, BACKUP);
 		}
-		assert.equal(K.verifyKeyconfig(good, 'not a root'), false);
-		assert.equal(K.verifyKeyconfig(good, root.slice(0, 20)), false);
+		assert.deepEqual(K.TRUST_ROOTS_B64URL, [
+			'lgcsJYcJVj99IW2N5rg73nkRmL0YkuU5uLkR1FsHfhc',
+			'ZeXBFyWu8WB0cvyjNIC4LKJymDe5HDb6H08JkcmwdpE',
+		]);
 	});
 
-	it('accepts the extension DEV root signature (shared H4 spec test keypair)', () => {
-		const pub = 'ZOyMjidjtZglDJYT5m3qoi1aaUMvXRm-gG6pzHDse4w';
-		const priv = createPrivateKey({
-			key: { kty: 'OKP', crv: 'Ed25519', d: 'H3WGgPhdAYS7Z1G8EtfWSPjzcGFLInWwhKvWCdAufBw', x: pub },
-			format: 'jwk',
+	it('the vector keyconfig does not verify against the production roots', () => {
+		assert.deepEqual(K.verifyKeyconfigV2(VECTORS.keyconfig_json, K.TRUST_ROOTS_B64URL, NOW, AUD), {
+			ok: false,
+			error: 'hpke_unverified_keyconfig',
 		});
-		const cfg = signedConfig(priv, [entry(7)]);
-		assert.equal(K.verifyKeyconfig(cfg, pub), true);
-		assert.equal(K.verifyKeyconfig(cfg, root), false);
+	});
+
+	it('frozen headers and limits match the vectors', () => {
+		assert.equal(K.DELEGATION_HEADER, 'pgw-keyconfig-delegation-v2');
+		assert.equal(K.KC_DOCUMENT_HEADER, 'pgw-keyconfig-v2');
+		const c = VECTORS.constants;
+		assert.equal(K.V2_LIMITS.CLIENT_SKEW_S, c.client_skew_s);
+		assert.equal(K.V2_LIMITS.KEYCONFIG_MAX_AGE_S, c.keyconfig_max_age_s);
+		assert.equal(K.V2_LIMITS.MAX_DELEGATION_LIFETIME_S, c.max_delegation_lifetime_s);
+		assert.equal(K.V2_LIMITS.DELEGATION_SERIAL_SLACK_S, c.delegation_serial_slack_s);
+		assert.equal(K.V2_LIMITS.KEY_EXPIRY_MARGIN_S, c.key_expiry_margin_s);
+		assert.equal(K.V2_LIMITS.MAX_AUDIENCE_HOSTS, c.max_audience_hosts);
+	});
+
+	it('equal to the extension lib/constants.js ROOT_KEYCONFIG_PUBKEYS', { skip: EXT_SKIP }, () => {
+		assert.deepEqual([...K.TRUST_ROOTS_B64URL], extPinnedRoots());
 	});
 });
 
-describe('validateKeyconfig', () => {
-	const expectBad = (cfg) =>
-		assert.throws(
-			() => K.validateKeyconfig(cfg),
-			(error) => error instanceof GatewayError && error.code === 'hpke_bad_keyconfig',
+describe('keyconfig_cases (pgw-v2.json)', () => {
+	it('has 53 cases', () => {
+		assert.equal(VECTORS.keyconfig_cases.length, 53);
+	});
+
+	for (const c of VECTORS.keyconfig_cases) {
+		it(c.name, () => {
+			const result = K.verifyKeyconfigV2(
+				c.keyconfig_json,
+				c.pinned_roots,
+				c.now,
+				c.expected_audience,
+			);
+			if (c.expect.key_id !== undefined) {
+				assert.equal(result.ok, true, JSON.stringify(result));
+				assert.equal(result.keyId, c.expect.key_id);
+				assert.ok(Buffer.isBuffer(result.publicKey) && result.publicKey.length === 32);
+			} else {
+				assert.deepEqual(result, { ok: false, error: c.expect.error });
+			}
+		});
+	}
+
+	it('the valid case selects key 101 with its public key, serial and expiry', () => {
+		const result = K.verifyKeyconfigV2(
+			VECTORS.keyconfig_json,
+			[PRIMARY],
+			NOW,
+			VECTORS.expected_audience,
 		);
-
-	it('returns keys[0] with the decoded 32-byte public key', () => {
-		const first = entry(1);
-		const result = K.validateKeyconfig({ keys: [first, entry(2)] });
-		assert.equal(result.keyId, 1);
-		assert.ok(Buffer.isBuffer(result.publicKey));
-		assert.equal(result.publicKey.length, 32);
-		assert.equal(result.publicKey.toString('base64url'), first.public_key);
+		const key = VECTORS.hpke_keys.find((k) => k.key_id === 101);
+		assert.equal(result.ok, true);
+		assert.equal(result.keyId, VECTORS.expected_selection.key_id);
+		assert.equal(result.publicKey.toString('base64url'), key.public_key);
+		assert.equal(result.notAfter, key.not_after);
+		assert.equal(result.serial, 1767139200);
+		assert.equal(result.issuedAt, 1767225540);
 	});
 
-	it('accepts key_id 0 and 2^32-1', () => {
-		assert.equal(K.validateKeyconfig({ keys: [entry(0)] }).keyId, 0);
-		assert.equal(K.validateKeyconfig({ keys: [entry(0xffffffff)] }).keyId, 0xffffffff);
+	it('the documents are the b64 of their text and the signatures reproduce from the seeds', () => {
+		const root = ed25519Signer(VECTORS.roots.primary.seed_hex);
+		const delegated = ed25519Signer(VECTORS.delegated.seed_hex);
+		assert.equal(root.publicKey, PRIMARY);
+		assert.equal(delegated.publicKey, VECTORS.delegated.public_key);
+		assert.equal(b64url(ascii(VECTORS.delegation.text)), VECTORS.delegation.b64);
+		assert.equal(b64url(root.sign(ascii(VECTORS.delegation.text))), VECTORS.delegation.signature);
+		assert.equal(b64url(ascii(VECTORS.keyconfig_v2.text)), VECTORS.keyconfig_v2.b64);
+		assert.equal(
+			b64url(delegated.sign(ascii(VECTORS.keyconfig_v2.text))),
+			VECTORS.keyconfig_v2.signature,
+		);
 	});
 
-	it('rejects empty keys', () => {
-		expectBad({ keys: [] });
-		expectBad({});
+	it('an empty root list trusts nothing; a non-finite clock or a non-object fails', () => {
+		assert.equal(K.verifyKeyconfigV2(VECTORS.keyconfig_json, [], NOW, AUD).ok, false);
+		assert.equal(K.verifyKeyconfigV2(VECTORS.keyconfig_json, [PRIMARY], NaN, AUD).ok, false);
+		assert.equal(K.verifyKeyconfigV2(null, [PRIMARY], NOW, AUD).ok, false);
+		assert.equal(K.verifyKeyconfigV2('x', [PRIMARY], NOW, AUD).ok, false);
 	});
 
-	it('rejects key_id out of range or not an integer', () => {
-		expectBad({ keys: [entry(-1)] });
-		expectBad({ keys: [entry(2 ** 32)] });
-		expectBad({ keys: [entry(1.5)] });
-		expectBad({ keys: [{ ...entry(1), key_id: '1' }] });
+	it('a v2 member on the prototype is not read', () => {
+		const config = Object.create({ v2: VECTORS.keyconfig_json.v2 });
+		assert.deepEqual(K.verifyKeyconfigV2(config, [PRIMARY], NOW, AUD), {
+			ok: false,
+			error: 'hpke_unverified_keyconfig',
+		});
+	});
+});
+
+describe('generated chains', () => {
+	const now = 1_800_000_000;
+
+	it('selects the highest key id that is valid past now + 300', () => {
+		const chain = makeTrustChain();
+		const pk = () => x25519Raw().pk;
+		const config = chain.keyconfig({
+			now,
+			keys: [
+				{ keyId: 5, pkR: pk(), notAfter: now + 10_000 },
+				{ keyId: 9, pkR: pk(), notAfter: now + 301 },
+				{ keyId: 12, pkR: pk(), notAfter: now + 300 },
+			],
+		});
+		assert.equal(K.verifyKeyconfigV2(config, chain.roots, now, AUD).keyId, 9);
 	});
 
-	it('rejects a wrong or missing suite', () => {
-		expectBad({ keys: [{ ...entry(1), suite: { kem: 32, kdf: 1, aead: 1 } }] });
-		expectBad({ keys: [{ ...entry(1), suite: { kem: 16, kdf: 1, aead: 2 } }] });
-		const { suite: _unused, ...noSuite } = entry(1);
-		expectBad({ keys: [noSuite] });
+	it('the second audience host verifies; another host does not', () => {
+		const chain = makeTrustChain();
+		const config = chain.keyconfig({
+			now,
+			keys: [{ keyId: 1, pkR: x25519Raw().pk, notAfter: now + 9999 }],
+		});
+		assert.equal(K.verifyKeyconfigV2(config, chain.roots, now, 'app.anonymizator.com').ok, true);
+		assert.equal(K.verifyKeyconfigV2(config, chain.roots, now, 'evil.example.com').ok, false);
 	});
 
-	it('rejects a public key that is not 32 bytes or not base64url', () => {
-		expectBad({ keys: [entry(1, Buffer.alloc(31).toString('base64url'))] });
-		expectBad({ keys: [entry(1, Buffer.alloc(33).toString('base64url'))] });
-		expectBad({ keys: [entry(1, 'not+base64/url')] });
-		expectBad({ keys: [{ ...entry(1), public_key: 5 }] });
+	it('S + L malleation of a valid signature is refused', () => {
+		const chain = makeTrustChain();
+		const config = chain.keyconfig({
+			now,
+			keys: [{ keyId: 1, pkR: x25519Raw().pk, notAfter: now + 9999 }],
+		});
+		assert.equal(K.verifyKeyconfigV2(config, chain.roots, now, AUD).ok, true);
+		const sig = Buffer.from(config.v2.keyconfig_sig, 'base64url');
+		let s = 0n;
+		for (let i = 63; i >= 32; i--) s = (s << 8n) | BigInt(sig[i]);
+		s += (1n << 252n) + 27742317777372353535851937790883648493n;
+		for (let i = 32; i < 64; i++) {
+			sig[i] = Number(s & 0xffn);
+			s >>= 8n;
+		}
+		const tampered = { v2: { ...config.v2, keyconfig_sig: sig.toString('base64url') } };
+		assert.deepEqual(K.verifyKeyconfigV2(tampered, chain.roots, now, AUD), {
+			ok: false,
+			error: 'hpke_unverified_keyconfig',
+		});
+	});
+
+	it('ed25519Verify never throws on garbage', () => {
+		const pub = Buffer.from(ed25519Signer().publicKey, 'base64url');
+		assert.equal(K.ed25519Verify(pub, Buffer.alloc(64), Buffer.from('x')), false);
+		assert.equal(
+			K.ed25519Verify(Buffer.alloc(32, 0xff), Buffer.alloc(64, 1), Buffer.from('x')),
+			false,
+		);
+		assert.equal(K.ed25519Verify(Buffer.alloc(31), Buffer.alloc(64), Buffer.from('x')), false);
+	});
+
+	it('strict decoders: padding, trailing bits, uint grammar, raw bytes', () => {
+		const key = x25519Raw().pk;
+		const good = key.toString('base64url');
+		assert.deepEqual(K.strictB64.key(good), key);
+		assert.equal(K.strictB64.key(`${good}=`), null);
+		// 32 bytes = 43 characters: the last one carries 2 unused low bits.
+		const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+		const last = alphabet.indexOf(good[good.length - 1]);
+		const nonCanonical = good.slice(0, -1) + alphabet[last | 1];
+		if (nonCanonical !== good) assert.equal(K.strictB64.key(nonCanonical), null);
+		assert.equal(K.parseUint('007'), null);
+		assert.equal(K.parseUint('9007199254740992'), null);
+		assert.equal(K.parseUint('9007199254740991'), 9007199254740991);
+		assert.equal(K.parseUint('١٢'), null);
+		assert.equal(K.parseUint(' 7'), null);
+		assert.equal(K.documentLines(hex('efbbbf410a')), null);
+		assert.equal(K.documentLines(ascii('a=1\r\n')), null);
+		assert.equal(K.documentLines(ascii('a=1\n\nb=2\n')), null);
+		assert.deepEqual(K.documentLines(ascii('a=1\nb=2\n')), ['a=1', 'b=2']);
+	});
+});
+
+describe('differential: the extension verifyKeyconfigV2', { skip: EXT_SKIP }, () => {
+	it('agrees on every vector case', async () => {
+		const ext = loadExtHpke();
+		for (const c of VECTORS.keyconfig_cases) {
+			const ours = strip(
+				K.verifyKeyconfigV2(c.keyconfig_json, c.pinned_roots, c.now, c.expected_audience),
+			);
+			const theirs = await ext.verifyKeyconfigV2(
+				c.keyconfig_json,
+				c.pinned_roots,
+				c.now,
+				c.expected_audience,
+			);
+			assert.deepEqual(ours, strip(theirs), c.name);
+		}
+	});
+
+	it('agrees on generated chains around every time boundary', async () => {
+		const ext = loadExtHpke();
+		const chain = makeTrustChain();
+		const base = 1_800_000_000;
+		const config = chain.keyconfig({
+			now: base,
+			issuedAt: base,
+			serial: base - 1000,
+			keys: [{ keyId: 3, pkR: x25519Raw().pk, notAfter: base + 3000 }],
+		});
+		for (const delta of [-1301, -1300, -301, -300, -299, 0, 1199, 1200, 1201, 2699, 2700, 2701]) {
+			const now = base + delta;
+			const ours = strip(K.verifyKeyconfigV2(config, chain.roots, now, AUD));
+			const theirs = await ext.verifyKeyconfigV2(config, chain.roots, now, AUD);
+			assert.deepEqual(ours, strip(theirs), `delta ${delta}`);
+		}
 	});
 });

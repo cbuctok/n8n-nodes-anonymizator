@@ -1,705 +1,1253 @@
-// gateway.ts against a fake n8n context whose httpRequestWithAuthentication is a fake HPKE
-// recipient gateway (keyconfig signed by an in-test Ed25519 root + sealed /v1/analyze).
-// The recipient below is an independent RFC 9180 open written with node:crypto for this test.
+// gateway.ts (protocol v2) against the compiled dist/ output: the gateway's vectors end to end
+// through `analyze` (fixed ephemeral key, the vector keyconfig and responses), the offsets vectors,
+// and a fake v2 gateway (an independent node:crypto recipient behind httpRequestWithAuthentication)
+// for every status, retry, allowlist, keyconfig cache and serial-floor path.
 import assert from 'node:assert/strict';
-import {
-	createCipheriv,
-	createDecipheriv,
-	createHmac,
-	createPrivateKey,
-	createPublicKey,
-	diffieHellman,
-	generateKeyPairSync,
-	sign,
-} from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { beforeEach, describe, it } from 'node:test';
+
+import {
+	EXT_DIR,
+	EXT_SKIP,
+	VECTORS,
+	hex,
+	json,
+	makeFakeGateway,
+	makeTrustChain,
+	octet,
+	x25519Public,
+} from './helpers/pgw.mjs';
 
 const require = createRequire(import.meta.url);
 const G = require('../dist/nodes/Anonymizator/shared/gateway.js');
 const { GatewayError } = require('../dist/nodes/Anonymizator/shared/errors.js');
+const { gatewayFailure } = require('../dist/nodes/Anonymizator/actions/protect.js');
+const { NodeApiError, NodeOperationError } = require('n8n-workflow');
 
-// ── Minimal HPKE recipient (Base mode, X25519/HKDF-SHA256/AES-256-GCM) ─────────────────────
-const SUITE_ID = Buffer.from('48504b45002000010002', 'hex');
-const KEM_ID = Buffer.from('4b454d0020', 'hex');
-const V1 = Buffer.from('HPKE-v1');
-const hmac = (k, d) =>
-	createHmac('sha256', k.length ? k : Buffer.alloc(32))
-		.update(d)
-		.digest();
-function expand(prk, info, L) {
-	const out = Buffer.alloc(L);
-	let t = Buffer.alloc(0);
-	for (let i = 1, done = 0; done < L; i++, done += 32) {
-		t = hmac(prk, Buffer.concat([t, info, Buffer.from([i])]));
-		t.copy(out, done, 0, Math.min(32, L - done));
+const NODE = {
+	name: 'Anonymizator',
+	type: 'test',
+	typeVersion: 1,
+	position: [0, 0],
+	parameters: {},
+};
+
+const NOW = 1_800_000_000;
+
+beforeEach(() => G.clearGatewayCaches());
+
+async function rejects(promise, code) {
+	let error;
+	try {
+		await promise;
+	} catch (e) {
+		error = e;
+	}
+	assert.ok(error instanceof GatewayError, `expected GatewayError(${code}), got ${error}`);
+	assert.equal(error.code, code, error.message);
+	return error;
+}
+
+/** A fake gateway plus the analyze options pointing at its roots and clock. */
+function setup(overrides = {}) {
+	const gw = makeFakeGateway({ now: NOW, ...overrides });
+	const options = {
+		trustRootsB64url: gw.chain.roots,
+		nowSeconds: NOW,
+		retryDelayMs: 1,
+		keyconfigRetryDelayMs: 1,
+	};
+	return { gw, options };
+}
+
+const spansOf = (text) => {
+	const out = [];
+	for (const [type, re] of [
+		['PERSON', /Janez Novak|Ana Kovač/gu],
+		['EMAIL_ADDRESS', /[a-z.]+@example\.(com|si)/g],
+	]) {
+		for (const m of text.matchAll(re)) {
+			// Code-point offsets, as the gateway reports them.
+			const start = [...text.slice(0, m.index)].length;
+			out.push({ entity_type: type, start, end: start + [...m[0]].length, score: 0.85 });
+		}
 	}
 	return out;
-}
-const lExtract = (sid, salt, label, ikm) =>
-	hmac(salt, Buffer.concat([V1, sid, Buffer.from(label), ikm]));
-const lExpand = (sid, prk, label, info, L) =>
-	expand(
-		prk,
-		Buffer.concat([Buffer.from([L >> 8, L & 255]), V1, sid, Buffer.from(label), info]),
-		L,
-	);
-const empty = Buffer.alloc(0);
+};
 
-function x25519Pair() {
-	const pair = generateKeyPairSync('x25519');
-	const spki = pair.publicKey.export({ format: 'der', type: 'spki' });
-	return { pk: Buffer.from(spki.subarray(spki.length - 32)), privateKey: pair.privateKey };
-}
+// ---------------------------------------------------------------------------------------------
 
-function openRequest(server, frame) {
-	if (frame[0] !== 1) throw new Error('bad version');
-	const prefix = frame.subarray(0, 13);
-	const keyId = frame.readUInt32BE(1);
-	const enc = frame.subarray(13, 45);
-	const ct = frame.subarray(45);
-	const encKey = createPublicKey({
-		key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), enc]),
-		format: 'der',
-		type: 'spki',
-	});
-	const dh = diffieHellman({ privateKey: server.privateKey, publicKey: encKey });
-	const ss = lExpand(
-		KEM_ID,
-		lExtract(KEM_ID, empty, 'eae_prk', dh),
-		'shared_secret',
-		Buffer.concat([enc, server.pk]),
-		32,
-	);
-	const ksc = Buffer.concat([
-		Buffer.from([0]),
-		lExtract(SUITE_ID, empty, 'psk_id_hash', empty),
-		lExtract(SUITE_ID, empty, 'info_hash', empty),
-	]);
-	const secret = lExtract(SUITE_ID, ss, 'secret', empty);
-	const key = lExpand(SUITE_ID, secret, 'key', ksc, 32);
-	const nonce = lExpand(SUITE_ID, secret, 'base_nonce', ksc, 12);
-	const exp = lExpand(SUITE_ID, secret, 'exp', ksc, 32);
-	const d = createDecipheriv('aes-256-gcm', key, nonce);
-	d.setAAD(prefix);
-	d.setAuthTag(ct.subarray(ct.length - 16));
-	const pt = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
-	return {
-		keyId,
-		ptLength: pt.length,
-		payload: JSON.parse(pt.toString('utf8').trimEnd()),
-		sealResponse(obj) {
-			const kn = lExpand(SUITE_ID, exp, 'sec', Buffer.from('pgw response v1'), 44);
-			const c = createCipheriv('aes-256-gcm', kn.subarray(0, 32), kn.subarray(32));
-			c.setAAD(empty);
-			const json = JSON.stringify(obj);
-			const body = Buffer.concat([
-				c.update(json + ' '.repeat(256 - (json.length % 256))),
-				c.final(),
-				c.getAuthTag(),
-			]);
-			return Buffer.concat([Buffer.from([1]), body]);
-		},
-	};
-}
+describe('vectors end to end through analyze (pgw-v2.json)', () => {
+	const root = [VECTORS.roots.primary.public_key];
+	const request = VECTORS.request;
+	const text = JSON.parse(request.payload_json).text;
 
-// ── Fake gateway ───────────────────────────────────────────────────────────────────────────
-function ed25519Root() {
-	const pair = generateKeyPairSync('ed25519');
-	const spki = pair.publicKey.export({ format: 'der', type: 'spki' });
-	return {
-		root: Buffer.from(spki.subarray(spki.length - 32)).toString('base64url'),
-		privateKey: pair.privateKey,
-	};
-}
-const ROOT = ed25519Root();
-const OTHER_ROOT = ed25519Root();
-
-const json = (obj, statusCode = 200) => ({
-	statusCode,
-	headers: { 'content-type': 'application/json; charset=utf-8' },
-	body: Buffer.from(JSON.stringify(obj)),
-});
-const sealedBody = (buf, statusCode = 200) => ({
-	statusCode,
-	headers: { 'Content-Type': 'application/octet-stream' },
-	body: buf,
-});
-
-// Production reports code-point offsets (Python); emulate that so the R7 sanitising is exercised.
-const PII = { 'Janez Novak': 'PERSON', 'ana.kovac@example.com': 'EMAIL_ADDRESS' };
-function detect(text) {
-	const out = [];
-	for (const [real, type] of Object.entries(PII)) {
-		for (let at = text.indexOf(real); at !== -1; at = text.indexOf(real, at + real.length)) {
-			const start = [...text.slice(0, at)].length;
-			out.push({ entity_type: type, start, end: start + [...real].length, score: 0.85 });
-		}
-	}
-	// Production does not sort; return reversed to prove the client copes.
-	return out.sort((a, b) => b.start - a.start);
-}
-
-function makeGateway({ keyId = 7, signer = ROOT.privateKey, rejectEntities = false } = {}) {
-	const gw = {
-		server: { ...x25519Pair(), keyId },
-		signer,
-		rejectEntities, // false | 'sealed' | 'plain'
-		overrides: [], // FIFO of { path, respond(opts) }
-		calls: [],
-		payloads: [],
-		unknownKeyAlways: false,
-		responseSpans: undefined,
-		rotate(newKeyId) {
-			this.server = { ...x25519Pair(), keyId: newKeyId };
-		},
-		keyconfig() {
-			const keys = [
-				{
-					key_id: this.server.keyId,
-					public_key: this.server.pk.toString('base64url'),
-					suite: { kem: 32, kdf: 1, aead: 2 },
-					not_after: '2030-01-01T00:00:00Z',
+	function vectorCtx(responseFor, expectedFrameHex) {
+		const posts = [];
+		const ctx = {
+			helpers: {
+				async httpRequestWithAuthentication(name, options) {
+					if (options.method === 'GET') return json(200, VECTORS.keyconfig_json);
+					posts.push(options.body);
+					assert.equal(options.body.toString('hex'), expectedFrameHex);
+					return responseFor(posts.length);
 				},
-			];
-			const msg = 'pgw-keyconfig-v1\n' + keys.map((k) => `${k.key_id}:${k.public_key}\n`).join('');
-			return {
-				version: 1,
-				keys,
-				sig_alg: 'ed25519-v1',
-				signature: sign(null, Buffer.from(msg), this.signer).toString('base64url'),
-			};
-		},
-		handle(opts) {
-			const path = new URL(opts.url).pathname;
-			const i = this.overrides.findIndex((o) => o.path === path);
-			if (i !== -1) {
-				const [o] = this.overrides.splice(i, 1);
-				return o.respond(opts);
-			}
-			if (path === '/v1/keyconfig' && opts.method === 'GET') return json(this.keyconfig());
-			if (path === '/v1/analyze' && opts.method === 'POST') {
-				if (!Buffer.isBuffer(opts.body)) return json({ error: 'hpke_required' }, 415);
-				// Like the real gateway: look the key_id up before trying to open the frame.
-				if (opts.body.readUInt32BE(1) !== this.server.keyId || this.unknownKeyAlways) {
-					return json({ error: 'hpke_unknown_key' }, 400);
-				}
-				let opened;
-				try {
-					opened = openRequest(this.server, opts.body);
-				} catch {
-					return json({ error: 'hpke_open_failed' }, 400);
-				}
-				this.payloads.push(opened.payload);
-				if (this.rejectEntities && opened.payload.entities !== undefined) {
-					const err = { error: 'invalid_entities', detail: 'unknown entities: NOT_A_TYPE' };
-					return this.rejectEntities === 'sealed'
-						? sealedBody(opened.sealResponse(err), 400)
-						: json(err, 400);
-				}
-				const entities = this.responseSpans ?? detect(opened.payload.text);
-				return sealedBody(opened.sealResponse({ entities }));
-			}
-			return json({}, 404);
-		},
-	};
-	gw.ctx = {
-		getNode: () => ({ name: 'Anonymizator' }),
-		helpers: {
-			async httpRequestWithAuthentication(credentialName, opts) {
-				assert.equal(this, gw.ctx, 'helper must be called with ctx as this');
-				gw.calls.push({ credentialName, ...opts, path: new URL(opts.url).pathname });
-				return gw.handle(opts);
 			},
-		},
+		};
+		return { ctx, posts };
+	}
+	const eph = (r) => {
+		const sk = hex(r.ephemeral_private_key_hex);
+		return { sk, pkE: x25519Public(sk) };
 	};
-	gw.count = (path) => gw.calls.filter((c) => c.path === path).length;
-	return gw;
-}
-
-const OPTS = { trustRootB64url: ROOT.root, retryDelayMs: 0 };
-const TEXT = '😀😀 Janez Novak, ana.kovac@example.com';
-
-async function rejectsWith(promise, code, httpCode) {
-	await assert.rejects(promise, (error) => {
-		assert.ok(error instanceof GatewayError, `expected GatewayError, got ${error}`);
-		assert.equal(error.code, code);
-		if (httpCode !== undefined) assert.equal(error.httpCode, httpCode);
-		assert.ok(error.message.length > 0);
-		return true;
+	const opts = (r, extra = {}) => ({
+		trustRootsB64url: root,
+		nowSeconds: r.timestamp,
+		testEphemeral: eph(r),
+		retryDelayMs: 1,
+		...extra,
 	});
-}
 
-beforeEach(() => G.clearKeyconfigCache());
+	it('success: the frame is byte-identical and the spans come back', async () => {
+		const success = VECTORS.responses.find((r) => r.name === 'success');
+		const { ctx } = vectorCtx(() => octet(200, hex(success.body_hex)), request.frame_hex);
+		const result = await G.analyze(ctx, text, undefined, opts(request));
+		assert.deepEqual(result, {
+			spans: [
+				{ entity_type: 'PERSON', start: 11, end: 20, score: 0.85 },
+				{ entity_type: 'EMAIL_ADDRESS', start: 22, end: 42, score: 1 },
+			],
+			possible: [],
+			entityFilterIgnored: false,
+		});
+		assert.deepEqual(
+			result.spans.map((s) => text.slice(s.start, s.end)),
+			['Ana Kovač', 'ana.kovac@example.si'],
+		);
+	});
 
-describe('sanitizeForOffsets', () => {
-	it('replaces each surrogate code unit with one space', () => {
-		const out = G.sanitizeForOffsets(TEXT);
-		assert.equal(out.length, TEXT.length);
-		assert.equal([...out].length, TEXT.length);
-		assert.equal(/[\uD800-\uDFFF]/.test(out), false);
-		assert.equal(out.slice(0, 5), '     ');
-		assert.equal(G.sanitizeForOffsets('a\uD800b'), 'a b');
-		assert.equal(G.sanitizeForOffsets('Janez Novak'), 'Janez Novak');
+	it('sealed error: invalid_entities without a filter is reported, not retried', async () => {
+		const sealedError = VECTORS.responses.find((r) => r.name === 'sealed_error');
+		const { ctx, posts } = vectorCtx(
+			() => octet(200, hex(sealedError.body_hex)),
+			request.frame_hex,
+		);
+		const error = await rejects(G.analyze(ctx, text, undefined, opts(request)), 'invalid_entities');
+		assert.equal(error.httpCode, 200);
+		assert.equal(error.detail, undefined);
+		assert.equal(posts.length, 1);
+	});
+
+	for (const exchange of VECTORS.exchanges) {
+		it(`exchange ${exchange.name}: UTF-16 entities and possible spans`, async () => {
+			const r = exchange.request;
+			const payload = JSON.parse(r.payload_json);
+			const response = exchange.responses[0];
+			const { ctx } = vectorCtx(() => octet(200, hex(response.body_hex)), r.frame_hex);
+			const result = await G.analyze(
+				ctx,
+				payload.text,
+				undefined,
+				opts(r, { possible: payload.possible === true }),
+			);
+			assert.deepEqual(result.spans, exchange.expect.entities_utf16);
+			assert.deepEqual(result.possible, exchange.expect.possible_utf16);
+			assert.deepEqual(
+				result.spans.map((s) => payload.text.slice(s.start, s.end)),
+				exchange.expect.entity_values,
+			);
+			assert.deepEqual(
+				result.possible.map((s) => payload.text.slice(s.start, s.end)),
+				exchange.expect.possible_values,
+			);
+		});
+	}
+
+	describe('offsets cases', () => {
+		assert.equal(VECTORS.offsets.unit, 'unicode_code_point');
+		assert.equal(VECTORS.offsets.interval, 'half_open');
+		for (const c of VECTORS.offsets.cases) {
+			it(c.name, () => {
+				assert.equal(c.text.length, c.utf16_units);
+				assert.equal([...c.text].length, c.code_points);
+				const converted = G.codePointSpansToUtf16(c.text, c.entities);
+				assert.deepEqual(converted, c.utf16);
+				assert.deepEqual(
+					converted.map((s) => c.text.slice(s.start, s.end)),
+					c.values,
+				);
+			});
+		}
+
+		it('every case through analyze and the fake gateway', async () => {
+			for (const c of VECTORS.offsets.cases) {
+				G.clearGatewayCaches();
+				const { gw, options } = setup({
+					analyze: (opened) => octet(200, opened.seal({ entities: c.entities })),
+				});
+				const { spans } = await G.analyze(gw.ctx, c.text, undefined, options);
+				assert.deepEqual(
+					spans.map((s) => c.text.slice(s.start, s.end)),
+					c.values,
+					c.name,
+				);
+				assert.equal(gw.opened[0].payload.text, c.text, 'the text is sent unchanged');
+			}
+		});
 	});
 });
 
-describe('analyze: happy path', () => {
-	it('returns spans that index the original text (emoji before a name)', async () => {
-		const gw = makeGateway();
-		const result = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(result.entityFilterIgnored, false);
+// ---------------------------------------------------------------------------------------------
+
+describe('analyze: request', () => {
+	it('seals {text} only, as a Buffer with the right headers; spans sorted', async () => {
+		const text = 'Janez Novak, janez.novak@example.com and Ana Kovač';
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				octet(200, opened.seal({ entities: spansOf(opened.payload.text).reverse() })),
+		});
+		const result = await G.analyze(gw.ctx, text, undefined, options);
+		assert.deepEqual(gw.opened[0].payload, { text });
+		assert.equal(gw.opened[0].payloadJson, JSON.stringify({ text }));
+		assert.equal(gw.opened[0].keyId, 101);
+		assert.equal(gw.opened[0].timestamp, NOW);
+		assert.equal(gw.opened[0].paddedLength, 256);
 		assert.deepEqual(
-			result.spans.map((s) => [s.entity_type, TEXT.slice(s.start, s.end), s.score]),
+			result.spans.map((s) => [s.entity_type, text.slice(s.start, s.end)]),
 			[
-				['PERSON', 'Janez Novak', 0.85],
-				['EMAIL_ADDRESS', 'ana.kovac@example.com', 0.85],
+				['PERSON', 'Janez Novak'],
+				['EMAIL_ADDRESS', 'janez.novak@example.com'],
+				['PERSON', 'Ana Kovač'],
+			],
+		);
+		const [post] = gw.posts();
+		assert.equal(post.headers.Accept, 'application/octet-stream, application/json');
+		assert.equal(post.timeout, 30000);
+		assert.equal(post.json, false);
+		const [get] = gw.gets('/v1/keyconfig');
+		assert.equal(get.headers.Accept, 'application/json');
+		assert.equal(get.timeout, 15000);
+		assert.equal(post.body.toString('latin1').includes('Janez'), false);
+	});
+
+	it('entities only for a non-empty filter; possible only when requested', async () => {
+		const { gw, options } = setup();
+		await G.analyze(gw.ctx, 'x', ['PERSON', 'IBAN'], options);
+		await G.analyze(gw.ctx, 'x', [], options);
+		await G.analyze(gw.ctx, 'x', undefined, { ...options, possible: true });
+		await G.analyze(gw.ctx, 'x', ['PERSON'], { ...options, possible: false });
+		assert.deepEqual(
+			gw.opened.map((o) => o.payloadJson),
+			[
+				'{"text":"x","entities":["PERSON","IBAN"]}',
+				'{"text":"x"}',
+				'{"text":"x","possible":true}',
+				'{"text":"x","entities":["PERSON"]}',
 			],
 		);
 	});
 
-	it('sends what the extension sends, through the n8n helper with the right options', async () => {
-		const gw = makeGateway();
-		await G.analyze(gw.ctx, TEXT, undefined, { ...OPTS, nowSeconds: 1_700_000_000 });
-		assert.deepEqual(
-			gw.calls.map((c) => `${c.method} ${c.url}`),
-			[
-				'GET https://anon.prosecco37.com/v1/keyconfig',
-				'POST https://anon.prosecco37.com/v1/analyze',
-			],
+	it('works with a context that has no getNode (load options, AI tool)', async () => {
+		const { gw, options } = setup();
+		delete gw.ctx.getNode;
+		const result = await G.analyze(gw.ctx, 'hello', undefined, options);
+		assert.deepEqual(result, { spans: [], possible: [], entityFilterIgnored: false });
+	});
+
+	it('text over the cap: payload_too_large before anything is sent', async () => {
+		const { gw, options } = setup();
+		const error = await rejects(
+			G.analyze(gw.ctx, 'a'.repeat(120001), undefined, options),
+			'payload_too_large',
 		);
-		for (const call of gw.calls) {
-			assert.equal(call.credentialName, 'anonymizatorApi');
-			assert.equal(call.disableFollowRedirect, true);
-			assert.equal(call.ignoreHttpStatusErrors, true);
-			assert.equal(call.returnFullResponse, true);
-			assert.equal(call.encoding, 'arraybuffer');
-			assert.equal(call.json, false);
-			assert.ok(call.timeout > 0);
+		assert.equal(error.httpCode, undefined);
+		assert.match(error.message, /too long/);
+		await rejects(
+			G.analyze(gw.ctx, 'a'.repeat(50001), undefined, { ...options, maxTextChars: 50000 }),
+			'payload_too_large',
+		);
+		assert.equal(gw.requests.length, 0);
+		await G.analyze(gw.ctx, 'a'.repeat(120000), undefined, options);
+		assert.equal(gw.posts().length, 1);
+	});
+
+	it('a payload_too_large from the BFF or the gateway names no limit the text already passed', async () => {
+		for (const response of [
+			() => json(413, { error: 'payload_too_large' }),
+			(opened) => octet(200, opened.seal({ error: 'payload_too_large' })),
+		]) {
+			G.clearGatewayCaches();
+			const { gw, options } = setup({ analyze: response });
+			const error = await rejects(
+				G.analyze(gw.ctx, 'x', undefined, { ...options, maxTextChars: 50000 }),
+				'payload_too_large',
+			);
+			assert.ok(error.httpCode);
+			assert.match(error.message, /too long/);
+			// What the node shows (protect.ts gatewayFailure gets the local cap as well).
+			const shown = gatewayFailure(gw.ctx, error, 0, 50000);
+			assert.match(shown.message, /too long/);
+			assert.doesNotMatch(`${shown.message} ${shown.description}`, /50,000|120,000/);
 		}
-		assert.equal(gw.calls[0].body, undefined);
-		// Accept: application/json is what makes the BFF answer a bad key with 401 instead of a
-		// 302 to its login page.
-		assert.equal(gw.calls[0].headers.Accept, 'application/json');
-		const post = gw.calls[1];
-		assert.ok(Buffer.isBuffer(post.body));
-		assert.equal(post.headers['Content-Type'], 'application/octet-stream');
-		assert.match(post.headers.Accept, /application\/octet-stream/);
-		assert.match(post.headers.Accept, /application\/json/);
-		assert.equal(post.body.readUInt32BE(1), 7);
-		assert.equal(post.body.readBigUInt64BE(5), BigInt(1_700_000_000));
-		const latin1 = post.body.toString('latin1');
-		assert.equal(latin1.includes('Janez'), false);
-		assert.equal(latin1.includes('example.com'), false);
-		// payload: { text } only, sanitised, padded to a bucket
-		assert.deepEqual(Object.keys(gw.payloads[0]), ['text']);
-		assert.equal(gw.payloads[0].text, G.sanitizeForOffsets(TEXT));
-	});
-
-	it('omits entities when undefined or empty, sends them when given', async () => {
-		const gw = makeGateway();
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		await G.analyze(gw.ctx, TEXT, [], OPTS);
-		await G.analyze(gw.ctx, TEXT, ['PERSON', 'IBAN', 'IBAN_CODE'], OPTS);
-		assert.equal('entities' in gw.payloads[0], false);
-		assert.equal('entities' in gw.payloads[1], false);
-		assert.deepEqual(gw.payloads[2].entities, ['PERSON', 'IBAN', 'IBAN_CODE']);
-	});
-
-	it('caches the keyconfig between calls; clearKeyconfigCache refetches', async () => {
-		const gw = makeGateway();
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(gw.count('/v1/keyconfig'), 1);
-		G.clearKeyconfigCache();
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
-	});
-
-	it('the keyconfig cache expires after KEYCONFIG_TTL_MS', async (t) => {
-		const gw = makeGateway();
-		const realNow = Date.now();
-		t.mock.method(Date, 'now', () => realNow);
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		Date.now.mock.mockImplementation(() => realNow + G.KEYCONFIG_TTL_MS - 1);
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(gw.count('/v1/keyconfig'), 1);
-		Date.now.mock.mockImplementation(() => realNow + G.KEYCONFIG_TTL_MS + 1);
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
-	});
-
-	it('the keyconfig cache is keyed by trust root', async () => {
-		const gw = makeGateway();
-		await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		// A keyconfig cached under ROOT must not be used, unverified, under another root.
-		await rejectsWith(
-			G.analyze(gw.ctx, TEXT, undefined, { ...OPTS, trustRootB64url: OTHER_ROOT.root }),
-			'hpke_unverified_keyconfig',
+		// The local refusal names the limit that applied.
+		const { gw, options } = setup();
+		const local = await rejects(
+			G.analyze(gw.ctx, 'a'.repeat(50001), undefined, { ...options, maxTextChars: 50000 }),
+			'payload_too_large',
 		);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
+		assert.match(gatewayFailure(gw.ctx, local, 0, 50000).description, /50,000 characters/);
 	});
 
-	it('fetchKeyconfig returns the verified document and honours force', async () => {
-		const gw = makeGateway();
-		const cfg = await G.fetchKeyconfig(gw.ctx, false, OPTS);
-		assert.equal(cfg.keys[0].key_id, 7);
-		await G.fetchKeyconfig(gw.ctx, false, OPTS);
-		await G.fetchKeyconfig(gw.ctx, true, OPTS);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
+	it('concurrent analyses share one keyconfig fetch', async () => {
+		const { gw, options } = setup();
+		await Promise.all([1, 2, 3].map((i) => G.analyze(gw.ctx, `t${i}`, undefined, options)));
+		assert.equal(gw.gets('/v1/keyconfig').length, 1);
+		assert.equal(gw.posts().length, 3);
+	});
+});
+
+describe('analyze: response validation (fail closed)', () => {
+	const cases = [
+		[
+			'a span past the end of the text',
+			{ entities: [{ entity_type: 'PERSON', start: 0, end: 99 }] },
+		],
+		['an empty span', { entities: [{ entity_type: 'PERSON', start: 2, end: 2 }] }],
+		['a negative start', { entities: [{ entity_type: 'PERSON', start: -1, end: 2 }] }],
+		['a fractional offset', { entities: [{ entity_type: 'PERSON', start: 0.5, end: 2 }] }],
+		['a string offset', { entities: [{ entity_type: 'PERSON', start: '0', end: 2 }] }],
+		['a non-object entity', { entities: [7] }],
+		['both entities and error', { entities: [], error: 'internal_error' }],
+		['neither', { result: [] }],
+		['entities not an array', { entities: {} }],
+		['an error that is not a code', { error: 'Bad Thing' }],
+		['an array', [1, 2]],
+	];
+	for (const [name, payload] of cases) {
+		it(`${name} -> hpke_bad_response`, async () => {
+			const { gw, options } = setup({ analyze: (opened) => octet(200, opened.seal(payload)) });
+			await rejects(G.analyze(gw.ctx, 'Janez Novak', undefined, options), 'hpke_bad_response');
+			assert.equal(gw.posts().length, 1);
+		});
+	}
+
+	it('non-JSON plaintext, a foreign seal, a v1 body, a plain 200 -> hpke_bad_response', async () => {
+		for (const handler of [
+			(opened) => octet(200, opened.seal('not json')),
+			() => octet(200, Buffer.alloc(120, 2)),
+			() => octet(200, Buffer.concat([Buffer.from([1]), Buffer.alloc(100)])),
+			() => json(200, { entities: [] }),
+		]) {
+			G.clearGatewayCaches();
+			const { gw, options } = setup({ analyze: handler });
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_bad_response');
+		}
 	});
 
-	it('drops malformed and out-of-range spans, sorts by start', async () => {
-		const gw = makeGateway();
-		gw.responseSpans = [
-			{ entity_type: 'EMAIL_ADDRESS', start: 18, end: 39 },
-			{ entity_type: 'PERSON', start: 5, end: 16, score: 0.5 },
-			{ entity_type: 'PERSON', start: 5, end: 999 },
-			{ entity_type: 'PERSON', start: -1, end: 3 },
-			{ entity_type: 'PERSON', start: 4, end: 4 },
-			{ entity_type: '', start: 1, end: 3 },
-			{ entity_type: 'PERSON', start: '1', end: 3 },
-			{ entity_type: 'PERSON', start: 1.5, end: 3 },
-			null,
-		];
-		const { spans } = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
+	it('a malformed entity type is kept as PII; a missing score is omitted; other members ignored', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				octet(
+					200,
+					opened.seal({
+						entities: [
+							{ entity_type: 'person', start: 0, end: 5 },
+							{ entity_type: 'EMAIL_ADDRESS', start: 6, end: 7, score: 'high' },
+						],
+						extra: true,
+						possible: 'ignored when not requested',
+					}),
+				),
+		});
+		const { spans, possible } = await G.analyze(gw.ctx, 'Janez x', undefined, options);
 		assert.deepEqual(spans, [
-			{ entity_type: 'PERSON', start: 5, end: 16, score: 0.5 },
-			{ entity_type: 'EMAIL_ADDRESS', start: 18, end: 39 },
+			{ entity_type: 'PII', start: 0, end: 5 },
+			{ entity_type: 'EMAIL_ADDRESS', start: 6, end: 7 },
+		]);
+		assert.deepEqual(possible, []);
+	});
+
+	it('possible: absent -> [], overlapping spans dropped, malformed -> hpke_bad_response', async () => {
+		const text = 'Ana dela pri Modra Vila';
+		const entities = [{ entity_type: 'PERSON', start: 0, end: 3 }];
+		const run = async (possible) => {
+			G.clearGatewayCaches();
+			const body = possible === undefined ? { entities } : { entities, possible };
+			const { gw, options } = setup({ analyze: (opened) => octet(200, opened.seal(body)) });
+			return G.analyze(gw.ctx, text, undefined, { ...options, possible: true });
+		};
+		assert.deepEqual((await run(undefined)).possible, []);
+		assert.deepEqual(
+			(
+				await run([
+					{ start: 13, end: 23, entity_type: 'ORGANIZATION', extra: 1 },
+					{ start: 1, end: 5, entity_type: 'ORGANIZATION' },
+				])
+			).possible,
+			[{ start: 13, end: 23, entity_type: 'ORGANIZATION' }],
+		);
+		for (const bad of [
+			{},
+			[{ start: 13, end: 99, entity_type: 'ORGANIZATION' }],
+			[{ start: 13, end: 23, entity_type: 'organization' }],
+			[{ start: 13, end: 23 }],
+			[null],
+			new Array(10001).fill({ start: 13, end: 23, entity_type: 'ORGANIZATION' }),
+		]) {
+			await rejects(run(bad), 'hpke_bad_response');
+		}
+	});
+
+	it('a span ending one past the text fails closed (ASCII and astral text)', async () => {
+		const astral = '\u{1F600} Ana'; // 5 code points, 6 UTF-16 units
+		assert.equal([...astral].length, 5);
+		assert.equal(astral.length, 6);
+		for (const [text, payload, possible] of [
+			['Call Ana', { entities: [{ entity_type: 'PERSON', start: 5, end: 9 }] }, false],
+			[astral, { entities: [{ entity_type: 'PERSON', start: 2, end: 6 }] }, false],
+			[astral, { entities: [], possible: [{ entity_type: 'PERSON', start: 2, end: 6 }] }, true],
+			['Call Ana', { entities: [], possible: [{ entity_type: 'PERSON', start: 5, end: 9 }] }, true],
+		]) {
+			G.clearGatewayCaches();
+			const { gw, options } = setup({ analyze: (opened) => octet(200, opened.seal(payload)) });
+			await rejects(
+				G.analyze(gw.ctx, text, undefined, { ...options, possible }),
+				'hpke_bad_response',
+			);
+		}
+		// The last code point itself is accepted.
+		G.clearGatewayCaches();
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				octet(200, opened.seal({ entities: [{ entity_type: 'PERSON', start: 2, end: 5 }] })),
+		});
+		const { spans } = await G.analyze(gw.ctx, astral, undefined, options);
+		assert.deepEqual(
+			spans.map((s) => astral.slice(s.start, s.end)),
+			['Ana'],
+		);
+	});
+
+	it('codePointSpansToUtf16: the end bound is the code-point length', () => {
+		const astral = '\u{1F600} Ana';
+		const span = (start, end) => [{ entity_type: 'PERSON', start, end }];
+		assert.equal(G.codePointSpansToUtf16(astral, span(2, 6)), null);
+		assert.deepEqual(G.codePointSpansToUtf16(astral, span(2, 5)), [
+			{ entity_type: 'PERSON', start: 3, end: 6 },
+		]);
+		assert.equal(G.codePointSpansToUtf16('Call Ana', span(5, 9)), null);
+		assert.deepEqual(G.codePointSpansToUtf16('Call Ana', span(5, 8)), [
+			{ entity_type: 'PERSON', start: 5, end: 8 },
+		]);
+		// A lone surrogate counts as one code point.
+		assert.equal(G.codePointSpansToUtf16('\uD83D x', span(0, 4)), null);
+		assert.deepEqual(G.codePointSpansToUtf16('\uD83D x', span(2, 3)), [
+			{ entity_type: 'PERSON', start: 2, end: 3 },
 		]);
 	});
 });
 
-describe('analyze: span edges', () => {
-	it('trims whitespace and surrogate stand-ins so a span never splits an emoji', async () => {
-		const gw = makeGateway();
-		// TEXT = '😀😀 Janez Novak, ...': code units 0-3 are surrogates, 4 is a space.
-		gw.responseSpans = [
-			{ entity_type: 'PERSON', start: 1, end: 16 },
-			{ entity_type: 'PERSON', start: 0, end: 4 },
-			{ entity_type: 'EMAIL_ADDRESS', start: 17, end: 39 },
-		];
-		const { spans } = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.deepEqual(
-			spans.map((s) => TEXT.slice(s.start, s.end)),
-			['Janez Novak', 'ana.kovac@example.com'],
-		);
-	});
-});
+// ---------------------------------------------------------------------------------------------
 
-describe('analyze: retries', () => {
-	it('after a key rotation, a filter retry reuses the fresh keyconfig', async () => {
-		const gw = makeGateway({ keyId: 7, rejectEntities: 'sealed' });
-		await G.fetchKeyconfig(gw.ctx, false, OPTS); // cache key 7
-		gw.rotate(8);
-		const result = await G.analyze(gw.ctx, TEXT, ['PERSON'], OPTS);
-		assert.equal(result.entityFilterIgnored, true);
+describe('analyze: retries (fresh seal on every attempt)', () => {
+	it('hpke_unknown_key: keyconfig refetched, resealed to the new key once', async () => {
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt, state) => {
+				if (attempt === 1) {
+					state.rotate(102, { drop: true });
+					return json(400, { error: 'hpke_unknown_key' });
+				}
+				return octet(200, opened.seal({ entities: [] }));
+			},
+		});
+		await G.analyze(gw.ctx, 'x', undefined, options);
+		assert.equal(gw.gets('/v1/keyconfig').length, 2);
 		assert.deepEqual(
-			gw.calls.map((c) => c.path),
-			['/v1/keyconfig', '/v1/analyze', '/v1/keyconfig', '/v1/analyze', '/v1/analyze'],
+			gw.posts().map((p) => p.body.readUInt32BE(1)),
+			[101, 102],
 		);
 	});
 
-	it('hpke_unknown_key: refetches the keyconfig and reseals exactly once', async () => {
-		const gw = makeGateway({ keyId: 7 });
-		await G.fetchKeyconfig(gw.ctx, false, OPTS); // cache key 7
-		gw.rotate(8);
-		const result = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(result.spans.length, 2);
-		assert.deepEqual(
-			gw.calls.map((c) => c.path),
-			['/v1/keyconfig', '/v1/analyze', '/v1/keyconfig', '/v1/analyze'],
-		);
-		assert.equal(gw.calls[3].body.readUInt32BE(1), 8);
+	it('hpke_key_expired the same way; twice in a row is reported', async () => {
+		const { gw, options } = setup({ analyze: () => json(400, { error: 'hpke_key_expired' }) });
+		const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_key_expired');
+		assert.equal(error.httpCode, 400);
+		assert.equal(gw.posts().length, 2);
+		assert.equal(gw.gets('/v1/keyconfig').length, 2);
 	});
 
-	it('hpke_unknown_key twice: gives up after one reseal', async () => {
-		const gw = makeGateway();
-		gw.unknownKeyAlways = true;
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_unknown_key', 400);
-		assert.equal(gw.count('/v1/analyze'), 2);
-	});
-
-	for (const mode of ['sealed', 'plain']) {
-		it(`${mode} invalid_entities with a filter: retries once without it`, async () => {
-			const gw = makeGateway({ rejectEntities: mode });
-			const result = await G.analyze(gw.ctx, TEXT, ['NOT_A_TYPE'], OPTS);
-			assert.equal(result.entityFilterIgnored, true);
-			assert.equal(result.spans.length, 2);
-			assert.equal(gw.count('/v1/analyze'), 2);
-			assert.deepEqual(gw.payloads[0].entities, ['NOT_A_TYPE']);
-			assert.equal('entities' in gw.payloads[1], false);
+	for (const [name, response, code] of [
+		[
+			'plain 502 upstream_unavailable',
+			() => json(502, { error: 'upstream_unavailable' }),
+			'upstream_unavailable',
+		],
+		[
+			'plain 504 upstream_timeout',
+			() => json(504, { error: 'upstream_timeout' }),
+			'upstream_timeout',
+		],
+		[
+			'plain 500 with an unknown code',
+			() => json(500, { error: 'kaboom', detail: 'trace' }),
+			'server_error',
+		],
+		['a 503 busy', () => json(503, { error: 'busy' }, { 'retry-after': '2' }), 'busy'],
+		[
+			'an HTML 502',
+			() => ({
+				statusCode: 502,
+				headers: { 'content-type': 'text/html' },
+				body: Buffer.from('<h1>'),
+			}),
+			'server_error',
+		],
+	]) {
+		it(`${name}: one retry after the pause, then ${code}`, async () => {
+			const { gw, options } = setup({ analyze: response });
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+			const posts = gw.posts();
+			assert.equal(posts.length, 2);
+			assert.notDeepEqual(
+				posts[0].body.subarray(13, 45),
+				posts[1].body.subarray(13, 45),
+				'fresh enc',
+			);
+			assert.equal(gw.gets('/v1/keyconfig').length, 1);
 		});
 	}
 
-	it('invalid_entities without a filter is an error, no retry', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => json({ error: 'invalid_entities' }, 400),
+	it('a sealed internal_error (HTTP 200) is retried; the second attempt can succeed', async () => {
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt) =>
+				octet(200, opened.seal(attempt === 1 ? { error: 'internal_error' } : { entities: [] })),
 		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'invalid_entities', 400);
-		assert.equal(gw.count('/v1/analyze'), 1);
+		const result = await G.analyze(gw.ctx, 'x', undefined, options);
+		assert.deepEqual(result.spans, []);
+		assert.equal(gw.posts().length, 2);
 	});
 
-	it('5xx on analyze: retried once with a fresh seal', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => ({
-				statusCode: 502,
-				headers: { 'content-type': 'text/plain' },
-				body: Buffer.from('upstream error'),
-			}),
+	it('a 5xx answered with a sealed body is opened (the sealed content decides)', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				octet(500, opened.seal({ entities: [{ entity_type: 'PERSON', start: 0, end: 1 }] })),
 		});
-		const result = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(result.spans.length, 2);
-		const posts = gw.calls.filter((c) => c.path === '/v1/analyze');
-		assert.equal(posts.length, 2);
-		assert.notDeepEqual(posts[0].body, posts[1].body);
+		const { spans } = await G.analyze(gw.ctx, 'x', undefined, options);
+		assert.equal(spans.length, 1);
+		assert.equal(gw.posts().length, 1);
 	});
 
-	it('5xx twice on analyze: server_error', async () => {
-		const gw = makeGateway();
-		const fail = { path: '/v1/analyze', respond: () => json({}, 503) };
-		gw.overrides.push(fail, { ...fail });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'server_error', 503);
-		assert.equal(gw.count('/v1/analyze'), 2);
-	});
-
-	it('5xx on a very large text: no retry, text_too_large that suggests splitting', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({}, 502) });
-		const big = 'Lorem ipsum. '.repeat(25000);
-		await assert.rejects(G.analyze(gw.ctx, big, undefined, OPTS), (error) => {
-			assert.equal(error.code, 'text_too_large');
-			assert.equal(error.httpCode, 502);
-			assert.match(error.message, /split/);
-			return true;
+	for (const [name, response, code] of [
+		[
+			'a sealed invalid_payload with HTTP 503',
+			(opened) => octet(503, opened.seal({ error: 'invalid_payload' })),
+			'invalid_payload',
+		],
+		[
+			'a sealed payload_too_large with HTTP 500',
+			(opened) => octet(500, opened.seal({ error: 'payload_too_large' })),
+			'payload_too_large',
+		],
+		[
+			'an octet-stream 502 that does not open',
+			() => octet(502, Buffer.alloc(120, 2)),
+			'hpke_bad_response',
+		],
+	]) {
+		it(`${name}: the sealed content decides, no retry (${code})`, async () => {
+			const { gw, options } = setup({ analyze: response });
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+			assert.equal(gw.posts().length, 1);
 		});
-		assert.equal(gw.count('/v1/analyze'), 1);
+	}
+
+	it('a sealed invalid_entities with HTTP 500: one filtered analysis, then the fail-open', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				opened.payload.entities
+					? octet(500, opened.seal({ error: 'invalid_entities' }))
+					: octet(200, opened.seal({ entities: [] })),
+		});
+		const result = await G.analyze(gw.ctx, 'x', ['PERSON'], options);
+		assert.equal(result.entityFilterIgnored, true);
+		assert.equal(gw.posts().length, 2);
 	});
 
-	it('5xx once on keyconfig: retried', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({ path: '/v1/keyconfig', respond: () => json({}, 500) });
-		const result = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(result.spans.length, 2);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
+	for (const [name, response, code, httpCode] of [
+		['409 hpke_replay', () => json(409, { error: 'hpke_replay' }), 'hpke_replay', 409],
+		['400 hpke_stale', () => json(400, { error: 'hpke_stale' }), 'hpke_stale', 400],
+		[
+			'413 payload_too_large',
+			() => json(413, { error: 'payload_too_large' }),
+			'payload_too_large',
+			413,
+		],
+		[
+			'sealed payload_too_large',
+			(opened) => octet(200, opened.seal({ error: 'payload_too_large' })),
+			'payload_too_large',
+			200,
+		],
+		[
+			'sealed hpke_bad_payload',
+			(opened) => octet(200, opened.seal({ error: 'hpke_bad_payload' })),
+			'hpke_bad_payload',
+			200,
+		],
+		[
+			'sealed unknown code',
+			(opened) => octet(200, opened.seal({ error: 'brand_new_code' })),
+			'http_200',
+			200,
+		],
+		[
+			'400 hpke_open_failed',
+			() => json(400, { error: 'hpke_open_failed' }),
+			'hpke_open_failed',
+			400,
+		],
+		['415 hpke_required', () => json(415, { error: 'hpke_required' }), 'hpke_required', 415],
+		[
+			'400 unknown code with detail',
+			() => json(400, { error: 'secret_code', detail: 'Janez Novak' }),
+			'http_400',
+			400,
+		],
+		[
+			'404 not JSON',
+			() => ({ statusCode: 404, headers: {}, body: Buffer.from('nope') }),
+			'http_404',
+			404,
+		],
+	]) {
+		it(`${name}: no retry, ${code}`, async () => {
+			const { gw, options } = setup({ analyze: response });
+			const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+			assert.equal(error.httpCode, httpCode);
+			assert.equal(error.detail, undefined, 'server text is never kept');
+			assert.ok(!error.message.includes('Janez'));
+			assert.equal(gw.posts().length, 1);
+		});
+	}
+
+	it('429: rate_limited with Retry-After in [1, 300], never retried', async () => {
+		for (const [header, expected] of [
+			['7', 7],
+			['300', 300],
+			['0', undefined],
+			['301', undefined],
+			['Wed, 21 Oct 2026 07:28:00 GMT', undefined],
+			[undefined, undefined],
+		]) {
+			G.clearGatewayCaches();
+			const { gw, options } = setup({
+				analyze: () => ({
+					statusCode: 429,
+					headers:
+						header === undefined ? { 'content-type': 'text/plain' } : { 'Retry-After': header },
+					body: Buffer.from('Too Many Requests'),
+				}),
+			});
+			const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'rate_limited');
+			assert.equal(error.retryAfter, expected, String(header));
+			assert.equal(error.httpCode, 429);
+			assert.equal(gw.posts().length, 1);
+		}
 	});
 });
 
-describe('analyze: status mapping', () => {
-	const redirect = () => ({
-		statusCode: 302,
-		headers: {
-			location: '/auth/login?return_to=/v1/keyconfig',
-			'content-type': 'text/html; charset=utf-8',
-		},
-		body: Buffer.from('<a href="/auth/login">Found</a>.'),
+describe('analyze: entity filter fail-open', () => {
+	it('sealed invalid_entities with a filter: one more analysis without it, flagged', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				octet(
+					200,
+					opened.seal(opened.payload.entities ? { error: 'invalid_entities' } : { entities: [] }),
+				),
+		});
+		const result = await G.analyze(gw.ctx, 'x', ['NOPE'], options);
+		assert.equal(result.entityFilterIgnored, true);
+		assert.deepEqual(
+			gw.opened.map((o) => o.payload),
+			[{ text: 'x', entities: ['NOPE'] }, { text: 'x' }],
+		);
 	});
 
-	it('302 on keyconfig: rejected key', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({ path: '/v1/keyconfig', respond: redirect });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'auth_required', 302);
-		assert.equal(gw.count('/v1/analyze'), 0);
+	it('plain-JSON invalid_entities is handled the same way; possible is kept on the retry', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				opened.payload.entities
+					? json(400, { error: 'invalid_entities' })
+					: octet(200, opened.seal({ entities: [] })),
+		});
+		const result = await G.analyze(gw.ctx, 'x', ['NOPE'], { ...options, possible: true });
+		assert.equal(result.entityFilterIgnored, true);
+		assert.deepEqual(gw.opened[1].payload, { text: 'x', possible: true });
 	});
 
-	it('302 on analyze and 401: rejected key', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => ({ statusCode: 302, headers: {}, body: Buffer.alloc(0) }),
+	it('invalid_entities without a filter is reported', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) => octet(200, opened.seal({ error: 'invalid_entities' })),
 		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'auth_required', 302);
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({}, 401) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'auth_required', 401);
+		await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'invalid_entities');
+		assert.equal(gw.posts().length, 1);
 	});
 
-	it('403 missing_role: no access; other 403: http_403', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/keyconfig',
-			respond: () => json({ error: 'missing_role' }, 403),
+	for (const [name, response, code] of [
+		[
+			'429 rate_limited',
+			() => json(429, { error: 'rate_limited' }, { 'retry-after': '7' }),
+			'rate_limited',
+		],
+		['409 hpke_replay', () => json(409, { error: 'hpke_replay' }), 'hpke_replay'],
+		['400 hpke_stale', () => json(400, { error: 'hpke_stale' }), 'hpke_stale'],
+		[
+			'a sealed invalid_payload',
+			(opened) => octet(200, opened.seal({ error: 'invalid_payload' })),
+			'invalid_payload',
+		],
+	]) {
+		it(`${name} with a filter: no fail-open, no retry`, async () => {
+			const { gw, options } = setup({
+				analyze: (opened, request) =>
+					opened.payload.entities
+						? response(opened, request)
+						: octet(200, opened.seal({ entities: [] })),
+			});
+			await rejects(G.analyze(gw.ctx, 'x', ['PERSON'], options), code);
+			assert.equal(gw.posts().length, 1);
+			assert.deepEqual(gw.opened[0].payload, { text: 'x', entities: ['PERSON'] });
 		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'no_access', 403);
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({ error: 'missing_role' }, 403) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'no_access', 403);
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => ({
-				statusCode: 403,
-				headers: { 'content-type': 'text/html' },
-				body: Buffer.from('<html>WAF</html>'),
-			}),
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'http_403', 403);
-	});
+	}
 
-	it('429: rate_limited, no retry; 413: text_too_large', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => ({ statusCode: 429, headers: { 'retry-after': '30' }, body: Buffer.alloc(0) }),
+	it('503 busy with a filter: one retry, both attempts still filtered', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) =>
+				opened.payload.entities
+					? json(503, { error: 'busy' })
+					: octet(200, opened.seal({ entities: [] })),
 		});
-		await assert.rejects(G.analyze(gw.ctx, TEXT, undefined, OPTS), (error) => {
-			assert.equal(error.code, 'rate_limited');
-			assert.match(error.message, /30 seconds/);
-			return true;
-		});
-		assert.equal(gw.count('/v1/analyze'), 1);
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({}, 413) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'text_too_large', 413);
-	});
-
-	it('pre-open JSON errors keep their code (hpke_stale mentions the clock)', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({ error: 'hpke_stale' }, 400) });
-		await assert.rejects(G.analyze(gw.ctx, TEXT, undefined, OPTS), (error) => {
-			assert.equal(error.code, 'hpke_stale');
-			assert.match(error.message, /clock/);
-			return true;
-		});
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => json({ error: 'hpke_open_failed' }, 400),
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_open_failed', 400);
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => json({ error: 'something_new' }, 400),
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'http_400', 400);
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({}, 404) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'http_404', 404);
-	});
-
-	it('an unopenable sealed error falls back to http_<status>', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => sealedBody(Buffer.from([1, 2, 3, 4]), 400),
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'http_400', 400);
+		await rejects(G.analyze(gw.ctx, 'x', ['PERSON'], options), 'busy');
+		assert.equal(gw.posts().length, 2);
+		assert.deepEqual(
+			gw.opened.map((o) => o.payload),
+			[
+				{ text: 'x', entities: ['PERSON'] },
+				{ text: 'x', entities: ['PERSON'] },
+			],
+		);
 	});
 });
 
-describe('analyze: keyconfig trust (fail closed)', () => {
-	it('a keyconfig signed by another root is refused and never cached', async () => {
-		const gw = makeGateway({ signer: OTHER_ROOT.privateKey });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_unverified_keyconfig');
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_unverified_keyconfig');
-		assert.equal(gw.count('/v1/analyze'), 0);
-		assert.equal(gw.count('/v1/keyconfig'), 2);
-	});
+describe('analyze: credential and transport', () => {
+	for (const [name, response, code, status] of [
+		[
+			'302 to the login page',
+			() => ({ statusCode: 302, headers: { location: '/auth/login' }, body: Buffer.alloc(0) }),
+			'auth_required',
+			302,
+		],
+		['307', () => ({ statusCode: 307, headers: {}, body: Buffer.alloc(0) }), 'auth_required', 307],
+		[
+			'401 unauthenticated',
+			() => json(401, { error: 'unauthenticated', error_description: 'no valid session' }),
+			'auth_required',
+			401,
+		],
+		['403 missing_role', () => json(403, { error: 'missing_role' }), 'no_access', 403],
+		['403 other', () => json(403, { error: 'forbidden' }), 'http_403', 403],
+	]) {
+		it(`${name} on analyze -> ${code}`, async () => {
+			const { gw, options } = setup({ analyze: response });
+			const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+			assert.equal(error.httpCode, status);
+			assert.equal(gw.posts().length, 1);
+		});
 
-	it('the production root refuses a test-signed keyconfig by default', async () => {
-		const gw = makeGateway();
-		await rejectsWith(G.analyze(gw.ctx, TEXT), 'hpke_unverified_keyconfig');
-	});
+		it(`${name} on keyconfig -> ${code}, nothing sealed`, async () => {
+			const { gw, options } = setup({ keyconfig: response });
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+			assert.equal(gw.posts().length, 0);
+		});
+	}
 
-	it('a swapped public key is refused', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/keyconfig',
-			respond: () => {
-				const cfg = gw.keyconfig();
-				cfg.keys[0].public_key = x25519Pair().pk.toString('base64url');
-				return json(cfg);
+	it('no response: offline or timeout; n8n errors pass through unchanged', async () => {
+		const cases = [
+			[Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }), 'offline'],
+			[
+				Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ECONNABORTED' }),
+				'timeout',
+			],
+			[new Error('socket hang up'), 'offline'],
+		];
+		for (const [thrown, code] of cases) {
+			G.clearGatewayCaches();
+			const ctx = {
+				helpers: {
+					async httpRequestWithAuthentication() {
+						throw thrown;
+					},
+				},
+			};
+			await rejects(
+				G.analyze(ctx, 'x', undefined, { trustRootsB64url: ['x'], nowSeconds: NOW }),
+				code,
+			);
+		}
+		const n8nError = Object.assign(new Error('Node does not have any credentials set'), {
+			name: 'NodeOperationError',
+		});
+		const ctx = {
+			helpers: {
+				async httpRequestWithAuthentication() {
+					throw n8nError;
+				},
 			},
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_unverified_keyconfig');
+		};
+		await assert.rejects(G.analyze(ctx, 'x'), (e) => e === n8nError);
 	});
 
-	it('an HTML or malformed keyconfig is hpke_bad_keyconfig', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/keyconfig',
-			respond: () => ({
+	it('n8n-core wraps transport failures in a NodeApiError: still offline or timeout', async () => {
+		// httpRequestWithAuthentication rethrows every axios failure as
+		// `new NodeApiError(this.getNode(), error)`.
+		const cases = [
+			[
+				Object.assign(new Error('connect ECONNREFUSED 10.0.0.1:443'), { code: 'ECONNREFUSED' }),
+				'offline',
+			],
+			[
+				Object.assign(new Error('getaddrinfo ENOTFOUND anon.prosecco37.com'), {
+					code: 'ENOTFOUND',
+				}),
+				'offline',
+			],
+			[
+				Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ECONNABORTED' }),
+				'timeout',
+			],
+			[Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }), 'timeout'],
+			[Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }), 'offline'],
+		];
+		for (const [inner, code] of cases) {
+			for (const where of ['keyconfig', 'analyze']) {
+				G.clearGatewayCaches();
+				const thrower = () => {
+					throw new NodeApiError(NODE, inner);
+				};
+				const { gw, options } = setup(
+					where === 'keyconfig' ? { keyconfig: thrower } : { analyze: thrower },
+				);
+				const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), code);
+				assert.equal(error.httpCode, undefined, `${inner.code} on ${where}`);
+				assert.equal(gw.posts().length, where === 'keyconfig' ? 0 : 1);
+			}
+		}
+	});
+
+	it('a NodeApiError around an n8n error (missing credential) passes through unchanged', async () => {
+		const wrapped = new NodeApiError(
+			NODE,
+			new NodeOperationError(NODE, 'Node does not have any credentials set'),
+		);
+		const ctx = {
+			helpers: {
+				async httpRequestWithAuthentication() {
+					throw wrapped;
+				},
+			},
+		};
+		await assert.rejects(G.analyze(ctx, 'x'), (e) => e === wrapped);
+		const operation = new NodeOperationError(NODE, 'Node does not have any credentials set');
+		const ctx2 = {
+			helpers: {
+				async httpRequestWithAuthentication() {
+					throw operation;
+				},
+			},
+		};
+		await assert.rejects(G.analyze(ctx2, 'x'), (e) => e === operation);
+	});
+});
+
+// ---------------------------------------------------------------------------------------------
+
+describe('keyconfig: trust chain (fail closed, nothing sent)', () => {
+	const keyFor = (gw, notAfter = NOW + 9999) => [
+		{ keyId: gw.keyId, pkR: gw.recipient.pkR, notAfter },
+	];
+
+	it('a v1-only keyconfig is not downgraded to: hpke_unverified_keyconfig', async () => {
+		const { gw, options } = setup({
+			keyconfig: () =>
+				json(200, {
+					version: 1,
+					keys: [{ key_id: 1, public_key: 'A'.repeat(43), suite: { kem: 32, kdf: 1, aead: 2 } }],
+					sig_alg: 'ed25519-v1',
+					signature: 'A'.repeat(86),
+				}),
+		});
+		const error = await rejects(
+			G.analyze(gw.ctx, 'x', undefined, options),
+			'hpke_unverified_keyconfig',
+		);
+		assert.equal(error.httpCode, 200);
+		assert.equal(gw.posts().length, 0);
+	});
+
+	it('signed by an unpinned root, an HTML login page, a sealed body: unverified', async () => {
+		for (const keyconfig of [
+			(request, state) => json(200, makeTrustChain().keyconfig({ now: NOW, keys: keyFor(state) })),
+			() => ({
 				statusCode: 200,
 				headers: { 'content-type': 'text/html' },
 				body: Buffer.from('<html>login</html>'),
 			}),
-		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_bad_keyconfig');
-		gw.overrides.push({ path: '/v1/keyconfig', respond: () => json({ keys: [] }) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_bad_keyconfig');
+			() => octet(200, Buffer.alloc(80)),
+		]) {
+			G.clearGatewayCaches();
+			const { gw, options } = setup({ keyconfig });
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_unverified_keyconfig');
+			assert.equal(gw.posts().length, 0);
+		}
 	});
 
-	it('a signed keyconfig with the wrong suite is hpke_bad_keyconfig', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/keyconfig',
-			respond: () => {
-				const cfg = gw.keyconfig();
-				cfg.keys[0].suite = { kem: 32, kdf: 1, aead: 1 }; // not covered by the signature
-				return json(cfg);
-			},
+	it('the production roots refuse a test chain', async () => {
+		const { gw } = setup();
+		await rejects(
+			G.analyze(gw.ctx, 'x', undefined, { nowSeconds: NOW }),
+			'hpke_unverified_keyconfig',
+		);
+		assert.equal(gw.posts().length, 0);
+	});
+
+	it('a stale keyconfig: hpke_stale_keyconfig; no usable key: hpke_no_usable_key', async () => {
+		const stale = setup({
+			keyconfig: (request, state) =>
+				json(200, state.chain.keyconfig({ now: NOW, issuedAt: NOW - 1201, keys: keyFor(state) })),
 		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_bad_keyconfig');
+		await rejects(G.analyze(stale.gw.ctx, 'x', undefined, stale.options), 'hpke_stale_keyconfig');
+		G.clearGatewayCaches();
+		const expiring = setup({
+			keyconfig: (request, state) =>
+				json(200, state.chain.keyconfig({ now: NOW, keys: keyFor(state, NOW + 300) })),
+		});
+		await rejects(
+			G.analyze(expiring.gw.ctx, 'x', undefined, expiring.options),
+			'hpke_no_usable_key',
+		);
+		assert.equal(stale.gw.posts().length + expiring.gw.posts().length, 0);
+	});
+
+	it('a keyconfig 5xx is retried once at once, then reported; 429 is not retried', async () => {
+		const { gw, options } = setup({ keyconfig: () => json(503, { error: 'hpke_not_configured' }) });
+		await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_not_configured');
+		assert.equal(gw.gets('/v1/keyconfig').length, 2);
+		G.clearGatewayCaches();
+		let calls = 0;
+		const flaky = setup({
+			keyconfig: (request, state) => (++calls === 1 ? json(502, {}) : json(200, state.config)),
+		});
+		await G.analyze(flaky.gw.ctx, 'x', undefined, flaky.options);
+		assert.equal(flaky.gw.gets('/v1/keyconfig').length, 2);
+		G.clearGatewayCaches();
+		const limited = setup({
+			keyconfig: () => json(429, { error: 'rate_limited' }, { 'retry-after': '5' }),
+		});
+		const error = await rejects(
+			G.analyze(limited.gw.ctx, 'x', undefined, limited.options),
+			'rate_limited',
+		);
+		assert.equal(error.retryAfter, 5);
+		assert.equal(limited.gw.gets('/v1/keyconfig').length, 1);
+	});
+
+	it('acquireKeyconfig returns the selected key', async () => {
+		const { gw, options } = setup();
+		const kc = await G.acquireKeyconfig(gw.ctx, options);
+		assert.equal(kc.ok, true);
+		assert.equal(kc.keyId, 101);
+		assert.deepEqual(kc.publicKey, gw.recipient.pkR);
 	});
 });
 
-describe('analyze: bad responses and transport failures', () => {
-	it('a 200 that does not open is hpke_bad_response', async () => {
-		const gw = makeGateway();
-		gw.overrides.push({
-			path: '/v1/analyze',
-			respond: () => sealedBody(Buffer.concat([Buffer.from([1]), Buffer.alloc(64)])),
+describe('keyconfig: audience binding (the expected audience is this deployment)', () => {
+	for (const audience of ['app.anonymizator.com', 'staging.example.net']) {
+		it(`a delegation for ${audience} only: hpke_unverified_keyconfig, nothing sent`, async () => {
+			const { gw, options } = setup({
+				keyconfig: (request, state) =>
+					json(
+						200,
+						state.chain.keyconfig({
+							now: NOW,
+							audience,
+							keys: [{ keyId: state.keyId, pkR: state.recipient.pkR, notAfter: NOW + 9999 }],
+						}),
+					),
+			});
+			await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_unverified_keyconfig');
+			assert.equal(gw.posts().length, 0);
+			assert.equal(G.delegationFloor(options), 0);
 		});
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_bad_response', 200);
-		gw.overrides.push({ path: '/v1/analyze', respond: () => json({ entities: [] }) });
-		await rejectsWith(G.analyze(gw.ctx, TEXT, undefined, OPTS), 'hpke_bad_response', 200);
+	}
+
+	it('a delegation for anon.prosecco37.com alone verifies', async () => {
+		const { gw, options } = setup({
+			keyconfig: (request, state) =>
+				json(
+					200,
+					state.chain.keyconfig({
+						now: NOW,
+						audience: 'anon.prosecco37.com',
+						keys: [{ keyId: state.keyId, pkR: state.recipient.pkR, notAfter: NOW + 9999 }],
+					}),
+				),
+		});
+		await G.analyze(gw.ctx, 'x', undefined, options);
+		assert.equal(gw.posts().length, 1);
+	});
+});
+
+describe('keyconfig: cache (10 min, re-verified on every use)', () => {
+	it('reused within 10 minutes, refetched after', async () => {
+		const { gw, options } = setup();
+		await G.analyze(gw.ctx, 'x', undefined, options);
+		await G.analyze(gw.ctx, 'x', undefined, { ...options, nowSeconds: NOW + 599 });
+		assert.equal(gw.gets('/v1/keyconfig').length, 1);
+		await G.analyze(gw.ctx, 'x', undefined, { ...options, nowSeconds: NOW + 601 });
+		assert.equal(gw.gets('/v1/keyconfig').length, 2);
 	});
 
-	it('an ArrayBuffer response body is accepted', async () => {
-		const gw = makeGateway();
-		const original = gw.ctx.helpers.httpRequestWithAuthentication;
-		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, opts) {
-			const res = await original.call(this, name, opts);
-			const ab = new ArrayBuffer(res.body.length);
-			new Uint8Array(ab).set(res.body);
-			return { ...res, body: ab };
-		};
-		const result = await G.analyze(gw.ctx, TEXT, undefined, OPTS);
-		assert.equal(result.spans.length, 2);
+	it('a cached keyconfig that no longer verifies (stale) is dropped and refetched', async () => {
+		let issuedAt = NOW - 1100;
+		const { gw, options } = setup({
+			keyconfig: (request, state) =>
+				json(
+					200,
+					state.chain.keyconfig({
+						now: NOW,
+						issuedAt,
+						keys: [{ keyId: state.keyId, pkR: state.recipient.pkR, notAfter: NOW + 9999 }],
+					}),
+				),
+		});
+		await G.analyze(gw.ctx, 'x', undefined, options);
+		issuedAt = NOW + 150;
+		await G.analyze(gw.ctx, 'x', undefined, { ...options, nowSeconds: NOW + 200 });
+		assert.equal(gw.gets('/v1/keyconfig').length, 2);
 	});
 
-	const throwing = (error) => ({
-		getNode: () => ({ name: 'Anonymizator' }),
-		helpers: {
-			httpRequestWithAuthentication: async () => {
-				throw error;
+	it('the production and a test root never share a cache entry', async () => {
+		const { gw, options } = setup();
+		await G.analyze(gw.ctx, 'x', undefined, options);
+		await rejects(
+			G.analyze(gw.ctx, 'x', undefined, { nowSeconds: NOW }),
+			'hpke_unverified_keyconfig',
+		);
+	});
+});
+
+describe('keyconfig: delegation serial floor', () => {
+	const OLD = NOW - 10 * 86400;
+	const NEW = NOW - 3600;
+
+	/** A gateway whose keyconfig answers walk through `serials`, signed at `clock.now - 30`. */
+	function chainSetup(serials) {
+		const chain = makeTrustChain();
+		const clock = { now: NOW };
+		let calls = 0;
+		const gw = makeFakeGateway({
+			now: NOW,
+			chain,
+			keyconfig: (request, state) => {
+				const serial = serials[Math.min(calls++, serials.length - 1)];
+				return json(
+					200,
+					chain.keyconfig({
+						now: clock.now,
+						serial,
+						issuedAt: clock.now - 30,
+						keys: [{ keyId: state.keyId, pkR: state.recipient.pkR, notAfter: NOW + 5 * 86400 }],
+					}),
+				);
 			},
-		},
-	});
-
-	it('timeouts and network errors map to timeout and offline', async () => {
-		await rejectsWith(
-			G.analyze(
-				throwing(Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ECONNABORTED' })),
-				TEXT,
-				undefined,
-				OPTS,
-			),
-			'timeout',
-		);
-		const wrapped = new Error('The service refused the connection - perhaps it is offline', {
-			cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
 		});
-		wrapped.name = 'NodeApiError';
-		await rejectsWith(G.analyze(throwing(wrapped), TEXT, undefined, OPTS), 'offline');
+		const options = {
+			trustRootsB64url: chain.roots,
+			nowSeconds: NOW,
+			retryDelayMs: 1,
+			keyconfigRetryDelayMs: 1,
+		};
+		return { gw, options, clock };
+	}
+
+	it('rises to the highest verified serial and is never lowered', async () => {
+		const { gw, options } = chainSetup([OLD, NEW, OLD]);
+		await G.acquireKeyconfig(gw.ctx, options);
+		assert.equal(G.delegationFloor(options), OLD);
+		await G.acquireKeyconfig(gw.ctx, { ...options, force: true });
+		assert.equal(G.delegationFloor(options), NEW);
+		// The older delegation again: the cached newer config still verifies and is kept.
+		const kc = await G.acquireKeyconfig(gw.ctx, { ...options, force: true });
+		assert.equal(kc.serial, NEW);
+		assert.equal(G.delegationFloor(options), NEW);
+		assert.equal(gw.gets('/v1/keyconfig').length, 3);
 	});
 
-	it("n8n's own NodeOperationError (e.g. missing credentials) passes through", async () => {
-		const error = new Error(
-			'Node "Anonymizator" does not have any credentials of type "anonymizatorApi" set',
+	it('renewal race without a usable cached config: one refetch after the pause', async () => {
+		const { gw, options, clock } = chainSetup([NEW, OLD, NEW]);
+		await G.acquireKeyconfig(gw.ctx, options);
+		// 1300 s later the cached config is stale; the first replica still serves OLD.
+		clock.now = NOW + 1300;
+		const kc = await G.acquireKeyconfig(gw.ctx, { ...options, nowSeconds: clock.now });
+		assert.equal(kc.serial, NEW);
+		assert.equal(gw.gets('/v1/keyconfig').length, 3);
+	});
+
+	it('below the floor twice: hpke_unverified_keyconfig, nothing sent', async () => {
+		const { gw, options, clock } = chainSetup([NEW, OLD]);
+		await G.acquireKeyconfig(gw.ctx, options);
+		clock.now = NOW + 1300;
+		await rejects(
+			G.analyze(gw.ctx, 'x', undefined, { ...options, nowSeconds: clock.now }),
+			'hpke_unverified_keyconfig',
 		);
-		error.name = 'NodeOperationError';
-		await assert.rejects(
-			G.analyze(throwing(error), TEXT, undefined, OPTS),
-			(thrown) => thrown === error,
+		assert.equal(gw.gets('/v1/keyconfig').length, 3);
+		assert.equal(gw.posts().length, 0);
+		assert.equal(G.delegationFloor(options), NEW);
+	});
+});
+
+describe('messages', () => {
+	it('every GatewayError message is a fixed sentence (no server text)', async () => {
+		const { gw, options } = setup({
+			analyze: () => json(400, { error: 'hpke_stale', detail: 'Janez Novak' }),
+		});
+		const error = await rejects(G.analyze(gw.ctx, 'x', undefined, options), 'hpke_stale');
+		assert.match(error.message, /clock/);
+		assert.ok(!JSON.stringify(error).includes('Janez'));
+	});
+
+	it('the allowlists match the extension lib/gateway.js', () => {
+		assert.deepEqual([...G.KNOWN_ERROR_CODES].sort(), [
+			'busy',
+			'hpke_bad_frame',
+			'hpke_bad_key_material',
+			'hpke_bad_payload',
+			'hpke_bad_version',
+			'hpke_key_expired',
+			'hpke_not_configured',
+			'hpke_open_failed',
+			'hpke_replay',
+			'hpke_required',
+			'hpke_stale',
+			'hpke_unknown_key',
+			'internal_error',
+			'invalid_entities',
+			'invalid_payload',
+			'missing_role',
+			'payload_too_large',
+			'rate_limited',
+			'unauthenticated',
+			'upstream_timeout',
+			'upstream_unavailable',
+		]);
+		assert.deepEqual([...G.SEALED_ERROR_CODES].sort(), [
+			'hpke_bad_payload',
+			'internal_error',
+			'invalid_entities',
+			'invalid_payload',
+			'payload_too_large',
+		]);
+	});
+
+	it('the allowlists equal the extension lib/gateway.js sets', { skip: EXT_SKIP }, () => {
+		const source = readFileSync(`${EXT_DIR}/lib/gateway.js`, 'utf8');
+		const set = (name) => {
+			const match = source.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\)`));
+			assert.ok(match, name);
+			return [...match[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]).sort();
+		};
+		assert.deepEqual([...G.KNOWN_ERROR_CODES].sort(), set('KNOWN_ERROR_CODES'));
+		assert.deepEqual([...G.SEALED_ERROR_CODES].sort(), set('SEALED_ERROR_CODES'));
+	});
+});
+
+describe('gatewayMessages', () => {
+	const M = require('../dist/nodes/Anonymizator/shared/gatewayMessages.js');
+	const LOCAL = [
+		'auth_required',
+		'no_access',
+		'hpke_unverified_keyconfig',
+		'hpke_stale_keyconfig',
+		'hpke_no_usable_key',
+		'hpke_seal_failed',
+		'hpke_bad_response',
+		'server_error',
+		'timeout',
+		'offline',
+		'text_too_large',
+		'hpke_bad_keyconfig',
+	];
+
+	it('covers every allowlisted, sealed and client-side code', () => {
+		for (const code of [...G.KNOWN_ERROR_CODES, ...G.SEALED_ERROR_CODES, ...LOCAL]) {
+			const entry = M.GATEWAY_MESSAGES[code];
+			assert.ok(entry, code);
+			assert.ok(entry.message.length > 10 && entry.description.length > 10, code);
+		}
+	});
+
+	it('follows the wording rules: no "error", "problem" or "failure"', () => {
+		for (const [code, { message, description }] of Object.entries(M.GATEWAY_MESSAGES)) {
+			assert.doesNotMatch(`${message} ${description}`, /\b(error|problem|failure)s?\b/i, code);
+		}
+	});
+
+	it('local failures are the client-side codes', () => {
+		assert.deepEqual([...M.LOCAL_FAILURES].sort(), [
+			'hpke_bad_keyconfig',
+			'hpke_bad_response',
+			'hpke_no_usable_key',
+			'hpke_seal_failed',
+			'hpke_stale_keyconfig',
+			'hpke_unverified_keyconfig',
+			'offline',
+			'timeout',
+		]);
+	});
+
+	it('a server payload_too_large does not claim the local limit', () => {
+		for (const httpCode of [413, 200]) {
+			const text = M.gatewayErrorText('payload_too_large', { maxTextChars: 120000, httpCode });
+			assert.match(text.message, /too long/);
+			assert.doesNotMatch(text.description, /[0-9]/, String(httpCode));
+		}
+		assert.match(
+			M.gatewayErrorText('payload_too_large', { maxTextChars: 80000 }).description,
+			/80,000 characters/,
 		);
+	});
+
+	it('gatewayErrorText adds Retry-After, the limit, and a fixed sentence for http_<status>', () => {
+		assert.match(
+			M.gatewayErrorText('rate_limited', { retryAfter: 12 }).description,
+			/Try again in 12 s\.$/,
+		);
+		assert.doesNotMatch(
+			M.gatewayErrorText('rate_limited', { retryAfter: 900 }).description,
+			/in 900 s/,
+		);
+		assert.match(M.gatewayErrorText('payload_too_large').description, /120,000 characters/);
+		assert.match(
+			M.gatewayErrorText('payload_too_large', { maxTextChars: 50000 }).description,
+			/50,000 characters/,
+		);
+		assert.deepEqual(M.gatewayErrorText('http_404', { httpCode: 404 }), {
+			message: 'The Anonymizator gateway answered with an unexpected status (HTTP 404)',
+			description: 'Try again later.',
+		});
+		assert.equal(M.gatewayErrorText('hpke_stale').message, "The n8n host's clock is off");
+		assert.equal(M.gatewayErrorText('constructor').description, 'Try again later.');
 	});
 });

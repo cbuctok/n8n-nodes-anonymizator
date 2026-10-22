@@ -1,13 +1,19 @@
 /**
- * RFC 9180 HPKE (Base mode, single shot) and the gateway wire frame.
+ * RFC 9180 HPKE (Base mode, single shot) and the gateway's protocol v2 wire frames.
  *
  * Suite: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM. Port of the extension's
- * `lib/hpke.js` using classic synchronous `node:crypto` (critique R1). There is deliberately no
- * suite negotiation.
+ * `lib/hpke.js` using classic synchronous `node:crypto`. There is deliberately no suite
+ * negotiation and no protocol v1 (sunset; the extension removed it too).
  *
- * Request frame: 0x01 || key_id u32BE || unix seconds u64BE || enc(32) || ct, AAD = 13-byte prefix,
- * plaintext = JSON padded with spaces to a UTF-8 size bucket. Response: 0x01 || ct, key||nonce =
- * export('pgw response v1', 44), empty AAD.
+ * Request frame: 0x02 || key_id u32BE || unix seconds u64BE || enc(32) || ct, AAD = the 13-byte
+ * prefix, HPKE info = 'pgw request v2', plaintext = JSON padded with spaces to a UTF-8 size bucket.
+ *
+ * Response (success and every post-open error): 0x02 || response_nonce(32) || ct, where
+ * (RFC 9458 section 4.4, plain HKDF-SHA256, not HPKE's labelled variants)
+ *   secret = context.export('pgw response v2', 32)
+ *   prk    = HKDF-Extract(salt = enc || response_nonce, secret)
+ *   key    = HKDF-Expand(prk, 'key', 32), nonce = HKDF-Expand(prk, 'nonce', 12)
+ * and an empty AAD. The plaintext is JSON padded with spaces.
  */
 import {
 	createCipheriv,
@@ -20,17 +26,29 @@ import {
 	type KeyObject,
 } from 'node:crypto';
 
-/** Frozen exporter label shared with the server. Never rename. */
-export const RESPONSE_EXPORT_LABEL = 'pgw response v1';
+/** Wire format version byte of protocol v2, request and response. */
+export const WIRE_VERSION = 0x02;
+
+/** Frozen HPKE `info` of a v2 request, shared with the server. Never rename. */
+export const REQUEST_INFO = 'pgw request v2';
+
+/** Frozen exporter label of a v2 response, shared with the server. Never rename. */
+export const RESPONSE_EXPORT_LABEL = 'pgw response v2';
 
 /** Plaintext size buckets in UTF-8 bytes; beyond the last, round up to a multiple of 4096. */
 export const PAD_BUCKETS: readonly number[] = [256, 1024, 4096, 16384, 65536];
 
-/** Wire format version byte for both request and response frames. */
-export const WIRE_VERSION = 0x01;
-
 /** Length of the request prefix (version, key_id, timestamp) that is also the AAD. */
 export const REQUEST_PREFIX_LENGTH = 13;
+
+/** Length of the random response nonce, max(Nn, Nk). */
+export const RESPONSE_NONCE_LENGTH = 32;
+
+/** Shortest possible v2 response: version, nonce and a bare GCM tag. */
+export const MIN_RESPONSE_LENGTH = 1 + RESPONSE_NONCE_LENGTH + 16;
+
+/** Highest key_id a v2 frame can carry (u32). */
+export const MAX_KEY_ID = 0xffffffff;
 
 // suite_id = "HPKE" || kem(2) || kdf(2) || aead(2); kem_suite_id = "KEM" || kem(2)
 const SUITE_ID = Buffer.from([0x48, 0x50, 0x4b, 0x45, 0x00, 0x20, 0x00, 0x01, 0x00, 0x02]);
@@ -46,7 +64,7 @@ const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex
 const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
 const EMPTY = Buffer.alloc(0);
 
-/** Deterministic ephemeral key pair, for the RFC 9180 test vector only. */
+/** Deterministic ephemeral key pair, for the RFC 9180 and gateway test vectors only. */
 export interface TestEphemeral {
 	sk: Buffer;
 	pkE: Buffer;
@@ -64,7 +82,11 @@ export type HpkeSealResult = {
 export type SealedRequest = {
 	/** The complete binary request body. Always a Buffer (never a Uint8Array view). */
 	body: Buffer;
-	/** Opens a `0x01 || ct` response sealed for this request; returns the parsed JSON. Throws on failure. */
+	/**
+	 * Opens a v2 response sealed for this request and returns the parsed JSON. Throws
+	 * `Error('hpke_bad_response')` when the body is not a v2 response for this context; a body that
+	 * opens but is not JSON throws a SyntaxError.
+	 */
 	openResponse: (bytes: Buffer) => unknown;
 };
 
@@ -221,41 +243,85 @@ export function padToBucket(json: string): string {
 	return json + ' '.repeat(target - length);
 }
 
-/**
- * Seals `payload` (JSON-serialised, padded) for the gateway key `keyId`/`pkR`.
- * `nowSeconds` defaults to the current unix time; tests pass a fixed value.
- */
-export function sealRequest(
-	pkR: Buffer,
-	keyId: number,
-	payload: unknown,
-	nowSeconds?: number,
-): SealedRequest {
+/** The 13-byte v2 frame prefix (also the AAD): version || key_id || timestamp. */
+export function framePrefix(keyId: number, nowSeconds?: number): Buffer {
 	const seconds = Math.floor(nowSeconds !== undefined ? nowSeconds : Date.now() / 1000);
 	const prefix = Buffer.alloc(REQUEST_PREFIX_LENGTH);
 	prefix.writeUInt8(WIRE_VERSION, 0);
 	prefix.writeUInt32BE(keyId >>> 0, 1);
 	prefix.writeBigUInt64BE(BigInt(seconds), 5);
+	return prefix;
+}
 
+/**
+ * The v2 response keys (RFC 9458 section 4.4): plain HKDF-SHA256 over the exported secret, salted
+ * with enc || response_nonce.
+ */
+export function deriveResponseKeys(
+	exportedSecret: Buffer,
+	enc: Buffer,
+	responseNonce: Buffer,
+): { prk: Buffer; key: Buffer; nonce: Buffer } {
+	const prk = hmac(Buffer.concat([enc, responseNonce]), exportedSecret);
+	const key = hkdfExpand(prk, Buffer.from('key', 'utf8'), NK);
+	const nonce = hkdfExpand(prk, Buffer.from('nonce', 'utf8'), NN);
+	return { prk, key, nonce };
+}
+
+/**
+ * Seals `payload` (JSON-serialised, padded) for the v2 gateway key `keyId`/`pkR`. Every HTTP attempt
+ * needs a fresh seal: the gateway refuses a resent frame (`hpke_replay`).
+ *
+ * `nowSeconds` defaults to the current unix time; `eph` (a fixed ephemeral key) is for the test
+ * vectors only, since reusing it for one key reuses the AES-GCM key and nonce.
+ * Throws `Error('hpke_seal_failed')` on an invalid key or key id.
+ */
+export function sealRequestV2(
+	pkR: Buffer,
+	keyId: number,
+	payload: unknown,
+	nowSeconds?: number,
+	eph?: TestEphemeral,
+): SealedRequest {
+	if (!Buffer.isBuffer(pkR) || pkR.length !== X25519_LENGTH) throw new Error('hpke_seal_failed');
+	if (!Number.isInteger(keyId) || keyId < 1 || keyId > MAX_KEY_ID) {
+		throw new Error('hpke_seal_failed');
+	}
+	const prefix = framePrefix(keyId, nowSeconds);
 	const pt = Buffer.from(padToBucket(JSON.stringify(payload)), 'utf8');
-	const sealed = seal(pkR, pt, prefix);
+	const sealed = seal(pkR, pt, prefix, Buffer.from(REQUEST_INFO, 'utf8'), eph);
 	pt.fill(0);
 	const body: Buffer = Buffer.concat([prefix, sealed.enc, sealed.ct]);
+	const enc = Buffer.from(sealed.enc);
 
 	return {
 		body,
 		openResponse(bytes: Buffer): unknown {
-			if (!Buffer.isBuffer(bytes) || bytes.length < 2 || bytes[0] !== WIRE_VERSION) {
+			if (
+				!Buffer.isBuffer(bytes) ||
+				bytes.length < MIN_RESPONSE_LENGTH ||
+				bytes[0] !== WIRE_VERSION
+			) {
 				throw new Error('hpke_bad_response');
 			}
-			const keyNonce = sealed.exportSecret(RESPONSE_EXPORT_LABEL, NK + NN);
-			const opened = aeadOpen(
-				keyNonce.subarray(0, NK),
-				keyNonce.subarray(NK),
-				EMPTY,
-				bytes.subarray(1),
+			const secret = sealed.exportSecret(RESPONSE_EXPORT_LABEL, NH);
+			const { prk, key, nonce } = deriveResponseKeys(
+				secret,
+				enc,
+				bytes.subarray(1, 1 + RESPONSE_NONCE_LENGTH),
 			);
-			keyNonce.fill(0);
+			let opened: Buffer | undefined;
+			try {
+				opened = aeadOpen(key, nonce, EMPTY, bytes.subarray(1 + RESPONSE_NONCE_LENGTH));
+			} catch {
+				opened = undefined;
+			} finally {
+				secret.fill(0);
+				prk.fill(0);
+				key.fill(0);
+				nonce.fill(0);
+			}
+			if (opened === undefined) throw new Error('hpke_bad_response');
 			const parsed: unknown = JSON.parse(opened.toString('utf8').trimEnd());
 			opened.fill(0);
 			return parsed;
@@ -265,7 +331,7 @@ export function sealRequest(
 
 const B64URL_RE = /^[A-Za-z0-9_-]*$/;
 
-/** Unpadded base64url decode. Throws on characters outside the base64url alphabet. */
+/** Lenient unpadded base64url decode (trailing `=` allowed). Throws outside the alphabet. */
 export function b64urlDecode(value: string): Buffer {
 	const trimmed = value.replace(/=+$/, '');
 	if (!B64URL_RE.test(trimmed) || trimmed.length % 4 === 1) {

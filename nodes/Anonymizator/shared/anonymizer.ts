@@ -1,5 +1,6 @@
 /**
- * Local substitution engine: faithful TypeScript port of the extension's `lib/anonymizer.js`, plus
+ * Local substitution engine: faithful TypeScript port of the extension's `lib/anonymizer.js`
+ * (2026.10.19.1: type sanitising, integer offsets, `isOwnPlaceholder`), plus
  * the pure `mask`, `isValidKey` and anonymize-wrapper helpers from `lib/id-set.js`. No network, no
  * state.
  *
@@ -15,6 +16,11 @@
  *   load-bearing: it keeps the suffix disjoint from the UPPERCASE type.
  * - PERSON entries also mint `KEY_NAME` (given name) and `KEY_SURNAME` (all remaining tokens).
  * - Offsets are UTF-16 code units (String#slice).
+ * - An analyzer type that is not a plain UPPERCASE identifier becomes `PII` (the span is still
+ *   protected, only its label is generic), and spans whose offsets are not integers are skipped.
+ * - `isOwnPlaceholder` (optional) is asked about every bracketed, whitespace-free token; a span
+ *   lying wholly inside a token it accepts is dropped, so re-protecting protected text never
+ *   rewrites the caller's own placeholders.
  *
  * Deliberate differences from the extension, none of which change results for valid input:
  * - The random suffix uses `randomInt` from node:crypto (no modulo bias; same alphabet and length).
@@ -26,6 +32,8 @@
  *   pass MAX_SUFFIX_DIGITS falls back to a random suffix, as the extension's IdSet.nextKey does.
  * - revealText looks each word run up in the table instead of compiling every key into one regular
  *   expression, so a huge map cannot crash the process.
+ * - pgwSpansFromTable skips an entry whose first letter/digit run is not a run of the text before
+ *   compiling its regex (exact, see there), so a table of thousands of IDs costs per text.
  */
 import { randomInt } from 'node:crypto';
 
@@ -90,10 +98,33 @@ const TITLE_TOKENS = new Set([
 /** One/two-letter abbreviations only count as titles when written with a dot. */
 const TITLE_DOT_REQUIRED = new Set(['g', 'ga']);
 
+/**
+ * An analyzer entity type becomes part of a placeholder (`[TYPE_a7k2q]`), so it must be a plain
+ * UPPERCASE identifier. Anything else (brackets, newlines, prompt text from a hostile or broken
+ * server) is coerced to the fallback type.
+ */
+export const ENTITY_TYPE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+export const FALLBACK_ENTITY_TYPE = 'PII';
+
+/** The analyzer type as a placeholder type: itself when it is a plain identifier, else `PII`. */
+export function pgwEntityType(type: unknown): string {
+	return typeof type === 'string' && ENTITY_TYPE_RE.test(type) ? type : FALLBACK_ENTITY_TYPE;
+}
+
+/** `anonymizeFromSpans` options: the extension's `{sequential, isOwnPlaceholder}`. */
+export type AnonymizeFromSpansOptions = AnonymizeOptions & {
+	/** Asked about every bracketed, whitespace-free token; spans wholly inside an accepted one are dropped. */
+	isOwnPlaceholder?: (token: string) => boolean;
+};
+
 const SUFFIX_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const SUFFIX_LENGTH = 5;
 
 const REGEX_SPECIALS = /[.*+?^${}()|[\]\\]/g;
+
+/** One run of Unicode letters and digits (the units the table matches are bounded by). */
+const WORD_RUN_RE = new RegExp('[\\p{L}\\p{N}]+', 'gu');
+const FIRST_RUN_RE = new RegExp('[\\p{L}\\p{N}]+', 'u');
 
 function hasOwn(obj: object, key: string): boolean {
 	return Object.prototype.hasOwnProperty.call(obj, key);
@@ -171,13 +202,13 @@ function mintKey(
 }
 
 /**
- * Highest sequential number per type in `table` (`/^([A-Z_]+)_(\d+)$/`), so numbering continues
+ * Highest sequential number per type in `table` (`/^([A-Z][A-Z0-9_]*)_(\d+)$/`), so numbering continues
  * across runs. Sub-keys such as `PERSON_1_NAME` do not end in digits and are ignored, and so are
  * suffixes longer than MAX_SUFFIX_DIGITS.
  */
 export function pgwCountersFromTable(table: PlaceholderTable): Record<string, number> {
 	const counters: Record<string, number> = {};
-	const re = /^([A-Z_]+)_(\d+)$/;
+	const re = /^([A-Z][A-Z0-9_]*)_(\d+)$/;
 	for (const key of Object.keys(table)) {
 		const m = re.exec(key);
 		if (!m || m[2].length > MAX_SUFFIX_DIGITS) continue;
@@ -195,10 +226,20 @@ export function pgwCountersFromTable(table: PlaceholderTable): Record<string, nu
  */
 export function pgwSpansFromTable(text: string, table: PlaceholderTable): Span[] {
 	const spans: Span[] = [];
+	let runs: Set<string> | null = null;
 	for (const [key, real] of Object.entries(table || {})) {
 		const value = String(real).trim();
 		if (!value) continue;
-		const typeMatch = /^([A-Z_]+?)_[a-z0-9]+(?:_[A-Z_]+)?$/.exec(key);
+		// A value can only match where its first letter/digit run is a whole run of the text (the
+		// match is bounded by non-letters/digits at both ends), so most entries are ruled out by one
+		// Set lookup instead of compiling and running a regex: the cost follows the text, not the
+		// table. Values with no letter or digit are always scanned. Results and order are unchanged.
+		const first = FIRST_RUN_RE.exec(value);
+		if (first) {
+			if (!runs) runs = new Set(text.match(WORD_RUN_RE) || []);
+			if (!runs.has(first[0])) continue;
+		}
+		const typeMatch = /^([A-Z][A-Z0-9_]*?)_[a-z0-9]+(?:_[A-Z][A-Z0-9_]*)?$/.exec(key);
 		const entityType = typeMatch ? typeMatch[1] : 'CUSTOM';
 		const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(value)}(?![\\p{L}\\p{N}])`, 'gu');
 		for (const m of text.matchAll(re)) {
@@ -243,7 +284,7 @@ export function anonymizeFromSpans(
 	text: string,
 	spans: Span[],
 	table: PlaceholderTable,
-	options?: AnonymizeOptions,
+	options?: AnonymizeFromSpansOptions,
 ): AnonymizeResult {
 	const source: PlaceholderTable = table || {};
 	const sequential = !!(options && options.sequential);
@@ -257,6 +298,27 @@ export function anonymizeFromSpans(
 		if (!realToKey.has(trimmed)) realToKey.set(trimmed, key);
 	}
 
+	const isOwn =
+		options && typeof options.isOwnPlaceholder === 'function' ? options.isOwnPlaceholder : null;
+	const ownTokens: Array<[number, number]> = []; // [start, end) of own placeholders, ascending
+	if (isOwn) {
+		for (const m of text.matchAll(/\[[^[\]\s]+\]/g)) {
+			const at = m.index ?? 0;
+			if (isOwn(m[0])) ownTokens.push([at, at + m[0].length]);
+		}
+	}
+	const insideOwnToken = (start: number, end: number): boolean => {
+		let lo = 0;
+		let hi = ownTokens.length - 1;
+		while (lo <= hi) {
+			// last token starting at or before `start`
+			const mid = (lo + hi) >> 1;
+			if (ownTokens[mid][0] <= start) lo = mid + 1;
+			else hi = mid - 1;
+		}
+		return hi >= 0 && end <= ownTokens[hi][1];
+	};
+
 	const sorted = [...(spans || []), ...pgwSpansFromTable(text, source)].sort(
 		(a, b) => a.start - b.start || b.end - a.end,
 	);
@@ -269,15 +331,17 @@ export function anonymizeFromSpans(
 	for (const span of sorted) {
 		let start = span.start;
 		let end = span.end;
+		if (!Number.isInteger(start) || !Number.isInteger(end)) continue; // not offsets
 		if (!(start >= cursor && end > start && end <= text.length)) continue;
 		while (start < end && /\s/.test(text[start])) start++;
 		while (end > start && /\s/.test(text[end - 1])) end--;
 		if (start >= end) continue;
+		if (ownTokens.length > 0 && insideOwnToken(start, end)) continue; // the caller's own placeholder
 		const real = text.slice(start, end);
+		const type = pgwEntityType(span.entity_type);
 
 		let key = realToKey.get(real);
 		if (!key) {
-			const type = span.entity_type;
 			key = mintKey(type, sequential, counters, source, newEntries);
 			realToKey.set(real, key);
 			newEntries[key] = real;
@@ -289,7 +353,7 @@ export function anonymizeFromSpans(
 		parts.push(between, replacement);
 		outLen += between.length;
 		entities.push({
-			entity_type: span.entity_type,
+			entity_type: type,
 			replacement,
 			start: outLen,
 			end: outLen + replacement.length,
@@ -373,7 +437,9 @@ export function protectText(
  * keys makes V8 abort the whole process while compiling it.
  */
 export function revealText(text: string, table: PlaceholderTable): string {
-	if (!table || Object.keys(table).length === 0) return text;
+	// No emptiness check: Object.keys on a map of a few hundred thousand keys costs seconds, and an
+	// empty table already leaves every run as it is.
+	if (!table) return text;
 	return text.replace(
 		/\[([A-Za-z0-9_]+)\]|\b([A-Za-z0-9_]+)\b/g,
 		(match: string, bracketed?: string, bare?: string) => {

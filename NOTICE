@@ -10,11 +10,27 @@ with the permission of Prosecco 37 d.o.o. The ported portions are:
 - the substitution engine (placeholder allocation, PERSON name sub-placeholders,
   masking and reveal), from lib/anonymizer.js and lib/id-set.js, in
   nodes/Anonymizator/shared/anonymizer.ts;
-- the HPKE (RFC 9180) request sealing and wire format, from lib/hpke.js, in
-  nodes/Anonymizator/shared/hpke.ts;
-- the gateway client logic (keyconfig verification, sealed analyze requests,
-  status handling), from lib/gateway.js, in nodes/Anonymizator/shared/gateway.ts
-  and nodes/Anonymizator/shared/keyconfig.ts;
-- the entity catalog, from lib/entities.js, in nodes/Anonymizator/shared/entities.ts;
-- the ID file format and its parse rules, from sidepanel/sidepanel-idfile.js, in
-  nodes/Anonymizator/shared/placeholderMap.ts.
+- the ID set model and its rules (types and placeholder prefixes, legal forms,
+  own-placeholder test, company names), from lib/id-model.js, lib/id-rules.js
+  and lib/id-names.js, in nodes/Anonymizator/shared/idModel.ts;
+- the Protect pipeline (prefixes, reserved placeholders, relabelling and
+  masking), from lib/id-edits.js, in
+  nodes/Anonymizator/shared/protectPipeline.ts;
+- the rules for numbers, currency values and company names ("Additionally
+  protect"), from lib/extra-detect.js, in nodes/Anonymizator/shared/extraDetect.ts;
+- the possible IDs, from lib/id-possible.js, in
+  nodes/Anonymizator/shared/possible.ts;
+- the HPKE (RFC 9180) request sealing, the wire format and the keyconfig and
+  capabilities verification, from lib/hpke.js, in
+  nodes/Anonymizator/shared/hpke.ts, nodes/Anonymizator/shared/keyconfig.ts and
+  nodes/Anonymizator/shared/capabilities.ts;
+- the gateway client logic (keyconfig acquisition, sealed analyze requests,
+  status handling, capabilities), from lib/gateway.js and lib/capabilities.js,
+  in nodes/Anonymizator/shared/gateway.ts and
+  nodes/Anonymizator/shared/capabilities.ts;
+- the error wording, from sidepanel/sidepanel-constants.js, in
+  nodes/Anonymizator/shared/gatewayMessages.ts;
+- the entity catalog, its merge with the server's capabilities and the entity
+  filter, from lib/entities.js, in nodes/Anonymizator/shared/entities.ts;
+- the ID file format (versions 1 and 2) and its parse rules, from
+  sidepanel/sidepanel-idfile.js, in nodes/Anonymizator/shared/placeholderMap.ts.

@@ -19,7 +19,7 @@ services:
   # scans that folder only during startup. A one-shot service keeps the n8n container's own
   # entrypoint untouched.
   setup:
-    image: docker.n8n.io/n8nio/n8n:2.41.7
+    image: docker.n8n.io/n8nio/n8n:2.44.5
     container_name: n8n-anonymizator-setup
     restart: 'no'
     user: root
@@ -39,7 +39,7 @@ services:
       - ./package.json:/package/package.json:ro
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:2.41.7
+    image: docker.n8n.io/n8nio/n8n:2.44.5
     container_name: n8n-anonymizator-dev
     restart: unless-stopped
     depends_on:

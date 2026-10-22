@@ -10,7 +10,7 @@
  * directory containing the scanner's package.json).
  *
  * Usage: npm run build && npm run scan
- *        SCAN_VERSION=0.38.0 npm run scan
+ *        SCAN_VERSION=0.40.0 npm run scan
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -19,7 +19,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SCAN_VERSION = process.env.SCAN_VERSION ?? '0.38.0';
+const SCAN_VERSION = process.env.SCAN_VERSION ?? '0.40.0';
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function scannerDir() {
