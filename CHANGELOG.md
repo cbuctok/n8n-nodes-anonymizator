@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-10-22
 
 Brought in line with the Anonymizator browser extension 2026.10.19.1, as listed below.
 
