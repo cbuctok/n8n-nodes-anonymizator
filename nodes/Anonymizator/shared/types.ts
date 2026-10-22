@@ -4,6 +4,7 @@
  * Output shapes are `type` aliases rather than interfaces on purpose: an object type alias is
  * assignable to n8n's `IDataObject` (an index-signature type), an interface is not.
  */
+import type { IdFileV2 } from './placeholderMap';
 
 /** The production privacy gateway. There is deliberately no base URL field (see critique O4). */
 export const GATEWAY_BASE_URL = 'https://anon.prosecco37.com';
@@ -62,13 +63,6 @@ export type AnonymizeOptions = {
 	sequential?: boolean;
 };
 
-/** Result of `gateway.analyze`. */
-export type AnalyzeResult = {
-	spans: Span[];
-	/** True when a sealed `invalid_entities` made the gateway retry without the type filter. */
-	entityFilterIgnored: boolean;
-};
-
 /** One entity in the node's Protect output. */
 export type OutputEntity = {
 	entityType: string;
@@ -96,6 +90,20 @@ export type IdFileV1 = {
 	usedPlaceholders: string[];
 };
 
+/**
+ * One possible ID in the Protect output: text left in clear that a person should check (a prompt to
+ * look, not a score). Offsets into `protectedText`.
+ */
+export type ProtectPossibleId = {
+	start: number;
+	end: number;
+	value: string;
+	/** company-name, surname, title-surname, case-form, number, amount, company or detected. */
+	kind: string;
+	/** An ID type code (PERSON, COMPANY, NUMBER, ...), or null when unknown. */
+	type: string | null;
+};
+
 /** Protect output item json (before optional input fields are merged in). */
 export type ProtectResult = {
 	protectedText: string;
@@ -103,7 +111,12 @@ export type ProtectResult = {
 	placeholderMap?: PlaceholderTable;
 	entities: OutputEntity[];
 	entityFilterIgnored?: true;
-	idFile?: IdFileV1;
+	/** With Include ID File (and Include Placeholder Map on), Random and Numbers in Order only. */
+	idFile?: IdFileV2;
+	/** With Include Possible IDs. */
+	possibleIds?: ProtectPossibleId[];
+	/** With Include Possible IDs, only when the list was capped. */
+	possibleIdsTruncated?: true;
 };
 
 /** One entity in the node's Detect output. */
@@ -117,6 +130,16 @@ export type DetectEntity = {
 	value?: string;
 };
 
+/** One possible ID in the Detect output: a gateway review-only span, never counted as found. */
+export type DetectPossibleId = {
+	entityType: string;
+	/** UTF-16 offsets into the ORIGINAL text (String#slice). */
+	start: number;
+	end: number;
+	/** The text; present only with Include Values. */
+	value?: string;
+};
+
 /** Detect output item json (before optional input fields are merged in). */
 export type DetectResult = {
 	hasPersonalData: boolean;
@@ -124,34 +147,12 @@ export type DetectResult = {
 	countsByType: Record<string, number>;
 	entities: DetectEntity[];
 	entityFilterIgnored?: true;
+	/** With Include Possible IDs. */
+	possibleIds?: DetectPossibleId[];
 };
 
 /** Reveal output item json (before optional input fields are merged in). */
 export type RevealResult = {
 	revealedText: string;
 	unresolvedPlaceholders: string[];
-};
-
-/** HPKE suite identifiers as carried in the keyconfig. Only `{kem:32,kdf:1,aead:2}` is accepted. */
-export type HpkeSuite = {
-	kem: number;
-	kdf: number;
-	aead: number;
-};
-
-/** One key in the gateway's `/v1/keyconfig`. `public_key` is raw X25519, base64url. */
-export type KeyconfigEntry = {
-	key_id: number;
-	public_key: string;
-	suite?: HpkeSuite;
-	/** Not covered by the signature: never trust it for security decisions. */
-	not_after?: string;
-};
-
-/** The gateway's `/v1/keyconfig` document. */
-export type Keyconfig = {
-	version?: number;
-	keys: KeyconfigEntry[];
-	sig_alg?: unknown;
-	signature?: unknown;
 };

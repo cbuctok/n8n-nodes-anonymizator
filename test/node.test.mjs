@@ -13,15 +13,13 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import {
-	createCipheriv,
-	createDecipheriv,
-	createHmac,
-	createPrivateKey,
-	createPublicKey,
-	diffieHellman,
-	generateKeyPairSync,
-	sign,
-} from 'node:crypto';
+	capabilitiesText,
+	ed25519Signer,
+	json,
+	makeFakeGateway,
+	makeTrustChain,
+	octet,
+} from './helpers/pgw.mjs';
 
 const require = createRequire(import.meta.url);
 const DIST = fileURLToPath(new URL('../dist/nodes/Anonymizator/', import.meta.url));
@@ -29,11 +27,14 @@ const DIST = fileURLToPath(new URL('../dist/nodes/Anonymizator/', import.meta.ur
 const { Anonymizator } = require(`${DIST}Anonymizator.node.js`);
 const gateway = require(`${DIST}shared/gateway.js`);
 const { GatewayError } = require(`${DIST}shared/errors.js`);
+const { ENTITY_CATALOG } = require(`${DIST}shared/entities.js`);
 const { NodeApiError, NodeOperationError } = require('n8n-workflow');
 
 const realAnalyze = gateway.analyze;
+const realFetchCapabilities = gateway.fetchCapabilities;
 after(() => {
 	gateway.analyze = realAnalyze;
+	gateway.fetchCapabilities = realFetchCapabilities;
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -84,6 +85,12 @@ function makeCtx({ items = [{}], params, continueOnFail = false, http, noGetNode
 	return ctx;
 }
 
+/** A load-options context with a credential selected (the editor sends it with the request). */
+function withCredential(ctx) {
+	ctx.getCredentials = async () => ({ apiKey: 'test' });
+	return ctx;
+}
+
 async function run(setup) {
 	const node = new Anonymizator();
 	const ctx = makeCtx(setup);
@@ -127,17 +134,48 @@ function detect(text, entityTypes) {
 
 let analyzeCalls;
 let analyzeBehaviour;
+let capabilitiesCalls;
+/** What the fake fetchCapabilities returns (null = no verified document, the bundled catalog). */
+let fakeCapabilities;
 
 function installFakeAnalyze() {
 	analyzeCalls = [];
 	analyzeBehaviour = {};
+	capabilitiesCalls = 0;
+	fakeCapabilities = null;
 	gateway.analyze = async (ctx, text, entityTypes, options) => {
 		analyzeCalls.push({ ctx, text, entityTypes, options });
 		if (analyzeBehaviour.throw) throw analyzeBehaviour.throw;
 		return {
 			spans: analyzeBehaviour.spans ? analyzeBehaviour.spans(text) : detect(text, entityTypes),
+			possible:
+				options?.possible === true && analyzeBehaviour.possible
+					? analyzeBehaviour.possible(text)
+					: [],
 			entityFilterIgnored: analyzeBehaviour.entityFilterIgnored === true,
 		};
+	};
+	gateway.fetchCapabilities = async () => {
+		capabilitiesCalls += 1;
+		return fakeCapabilities;
+	};
+}
+
+/** A minimal verified-capabilities shape (what gateway.fetchCapabilities resolves to). */
+function makeCapabilities({ entities = [], possible = [], labels = [], groups = [] } = {}) {
+	return {
+		version: 1,
+		serverVersion: '2026.10.19.1',
+		issuedAt: 1790000000,
+		languages: ['en'],
+		labelLanguages: ['en'],
+		maxTextChars: 120000,
+		maxBodyBytes: 2097152,
+		features: [],
+		groups,
+		entities,
+		possible,
+		labels: new Map(labels.map(([ref, text]) => [ref, new Map([['en', text]])])),
 	};
 }
 
@@ -172,16 +210,34 @@ describe('node description', () => {
 		assert.equal(description.usableAsTool, true);
 	});
 
-	test('entity types list the whole catalog, sorted by name', () => {
+	test('entity types are loaded by getEntityTypes (dynamic multiOptions, n8n wording)', () => {
 		const prop = description.properties.find((p) => p.name === 'entityTypes');
 		assert.equal(prop.type, 'multiOptions');
-		assert.equal(prop.options.length, 16);
-		const names = prop.options.map((o) => o.name);
-		assert.deepEqual(
-			names,
-			[...names].sort((a, b) => a.localeCompare(b, 'en')),
+		assert.equal(prop.typeOptions.loadOptionsMethod, 'getEntityTypes');
+		assert.equal(prop.options, undefined);
+		assert.deepEqual(prop.default, []);
+		assert.match(prop.displayName, /Names or IDs$/);
+		assert.match(
+			prop.description,
+			/Choose from the list, or specify IDs using an <a href="https:\/\/docs\.n8n\.io\/code\/expressions\/">expression<\/a>\.?$/,
 		);
 		assert.deepEqual(prop.displayOptions.show.detect, ['selected']);
+		assert.equal(typeof new Anonymizator().methods.loadOptions.getEntityTypes, 'function');
+	});
+
+	test('placeholder styles use the extension names; values and default unchanged', () => {
+		const prop = description.properties.find((p) => p.name === 'placeholderStyle');
+		assert.deepEqual(
+			prop.options.map((o) => [o.name, o.value]),
+			[
+				['Random', 'random'],
+				['Numbers in Order', 'sequential'],
+				['Type Only', 'typed'],
+				['Redacted', 'redacted'],
+			],
+		);
+		assert.equal(prop.default, 'random');
+		assert.match(prop.description, /No option makes text anonymous/);
 	});
 
 	const optionsFor = (operation) =>
@@ -194,11 +250,13 @@ describe('node description', () => {
 		assert.deepEqual(
 			prop.options.map((o) => o.name),
 			[
+				'additionallyProtect',
 				'existingPlaceholderMap',
 				'ignoreTerms',
 				'includeIdFile',
 				'includeInputFields',
 				'includePlaceholderMap',
+				'includePossibleIds',
 				'shareMapAcrossItems',
 			],
 		);
@@ -211,13 +269,26 @@ describe('node description', () => {
 		}
 		const existing = prop.options.find((o) => o.name === 'existingPlaceholderMap');
 		assert.match(existing.placeholder, /^e\.g\. /);
+		const extra = prop.options.find((o) => o.name === 'additionallyProtect');
+		assert.equal(extra.type, 'multiOptions');
+		assert.deepEqual(extra.default, []);
+		assert.deepEqual(
+			extra.options.map((o) => [o.name, o.value]),
+			[
+				['All Currency Values', 'AMOUNT'],
+				['All Numbers', 'NUMBER'],
+				['Company Names (With Legal Suffixes Only)', 'COMPANY'],
+			],
+		);
+		const possible = prop.options.find((o) => o.name === 'includePossibleIds');
+		assert.match(possible.description, /a prompt to look, not a score/);
 	});
 
 	test('detect options are alphabetical and default off', () => {
 		const prop = optionsFor('detect');
 		assert.deepEqual(
 			prop.options.map((o) => o.name),
-			['ignoreTerms', 'includeInputFields', 'includeValues'],
+			['ignoreTerms', 'includeInputFields', 'includePossibleIds', 'includeValues'],
 		);
 		for (const o of prop.options.filter((x) => x.type === 'boolean'))
 			assert.equal(o.default, false);
@@ -277,7 +348,8 @@ describe('Protect (fake analyze)', () => {
 		assert.match(person, RANDOM_PERSON);
 		assert.equal(placeholderMap[`${person}_NAME`], 'Janez');
 		assert.equal(placeholderMap[`${person}_SURNAME`], 'Novak');
-		assert.match(keyFor(placeholderMap, 'ana.kovac@example.com'), /^EMAIL_ADDRESS_[a-z0-9]{5}$/);
+		// Placeholders use the extension's prefixes (EMAIL_ADDRESS -> EMAIL); entityType keeps the type.
+		assert.match(keyFor(placeholderMap, 'ana.kovac@example.com'), /^EMAIL_[a-z0-9]{5}$/);
 		assert.match(keyFor(placeholderMap, 'SI56 1910 0000 0123 438'), /^IBAN_[a-z0-9]{5}$/);
 		for (const value of ['Janez', 'ana.kovac', 'SI56']) {
 			assert.ok(!protectedText.includes(value), `${value} must not survive`);
@@ -306,16 +378,52 @@ describe('Protect (fake analyze)', () => {
 
 	test('selected types send the mapped server types', async () => {
 		await run({ params: protectParams({ detect: 'selected', entityTypes: ['PERSON', 'IBAN'] }) });
-		assert.deepEqual(analyzeCalls[0].entityTypes, ['PERSON', 'IBAN', 'IBAN_CODE']);
+		assert.deepEqual(analyzeCalls[0].entityTypes, ['IBAN', 'IBAN_CODE', 'PERSON']);
 	});
 
 	test('selecting every type is the same as all types', async () => {
-		const { description } = new Anonymizator();
-		const all = description.properties
-			.find((p) => p.name === 'entityTypes')
-			.options.map((o) => o.value);
+		const all = ENTITY_CATALOG.map((row) => row.id);
 		await run({ params: protectParams({ detect: 'selected', entityTypes: all }) });
 		assert.equal(analyzeCalls[0].entityTypes, undefined);
+	});
+
+	test('with verified capabilities, every built-in row still omits the field', async () => {
+		fakeCapabilities = makeCapabilities({
+			entities: [
+				{ type: 'PERSON', default: 'on', groups: ['general'] },
+				{ type: 'IT_FISCAL_CODE', default: 'on', groups: [] },
+			],
+		});
+		const all = ENTITY_CATALOG.map((row) => row.id);
+		await run({ params: protectParams({ detect: 'selected', entityTypes: all }) });
+		assert.equal(analyzeCalls[0].entityTypes, undefined, 'server-only types are not dropped');
+		await run({
+			params: protectParams({ detect: 'selected', entityTypes: [...all, 'IT_FISCAL_CODE'] }),
+		});
+		assert.equal(analyzeCalls[1].entityTypes, undefined, 'every built-in row selected omits it');
+		await run({
+			params: protectParams({
+				detect: 'selected',
+				entityTypes: ['IT_FISCAL_CODE', 'EMAIL_ADDRESS'],
+			}),
+		});
+		assert.deepEqual(analyzeCalls[2].entityTypes, ['EMAIL_ADDRESS', 'IT_FISCAL_CODE']);
+	});
+
+	test('an unknown TYPE-shaped id is sent (the gateway retry covers it); others are dropped', async () => {
+		await run({
+			params: protectParams({ detect: 'selected', entityTypes: ['PERSON', 'NEW_TYPE', 'bad id'] }),
+		});
+		assert.deepEqual(analyzeCalls[0].entityTypes, ['NEW_TYPE', 'PERSON']);
+	});
+
+	test('the text cap comes from the verified capabilities', async () => {
+		await run({ params: protectParams() });
+		assert.equal(analyzeCalls[0].options.maxTextChars, 120000, 'bundled cap without a document');
+		fakeCapabilities = { ...makeCapabilities(), maxTextChars: 50000, maxBodyBytes: 2097152 };
+		await run({ params: protectParams() });
+		assert.equal(analyzeCalls[1].options.maxTextChars, 50000);
+		assert.equal(analyzeCalls[1].options.possible, undefined, 'possible only when asked for');
 	});
 
 	test('entity types are ignored while detect is all (hidden parameter keeps its value)', async () => {
@@ -356,9 +464,10 @@ describe('Protect (fake analyze)', () => {
 				options: { includeIdFile: true },
 			}),
 		});
-		assert.equal(item.json.protectedText, '[PERSON] wrote from [EMAIL_ADDRESS] about [IBAN].');
+		assert.equal(item.json.protectedText, '[PERSON] wrote from [EMAIL] about [IBAN].');
 		assert.deepEqual(item.json.placeholderMap, {});
-		assert.ok(!('idFile' in item.json), 'masked output has nothing to save');
+		// Include ID File writes no file for masked styles (the contract before extension parity).
+		assert.ok(!('idFile' in item.json));
 		for (const e of item.json.entities) {
 			assert.equal(item.json.protectedText.slice(e.start, e.end), e.placeholder);
 		}
@@ -559,14 +668,16 @@ describe('Protect (fake analyze)', () => {
 		const [item] = await run({ params: protectParams({ options: { includeIdFile: true } }) });
 		const { idFile, placeholderMap } = item.json;
 		assert.equal(idFile.format, 'anonymizator-id-file');
-		assert.equal(idFile.version, 1);
+		assert.equal(idFile.version, 2);
 		assert.equal(idFile.numbering, 'random');
-		assert.equal(idFile.ids.length, Object.keys(placeholderMap).length);
-		for (const entry of idFile.ids) {
+		assert.equal(idFile.ids.length + idFile.nameParts.length, Object.keys(placeholderMap).length);
+		assert.equal(idFile.nameParts.length, 2, 'the PERSON name parts');
+		for (const entry of [...idFile.ids, ...idFile.nameParts]) {
 			assert.match(entry.placeholder, /^\[[A-Z][A-Za-z0-9_]*\]$/);
-			assert.equal(entry.addedByYou, false);
 			assert.equal(placeholderMap[entry.placeholder.slice(1, -1)], entry.value);
 		}
+		for (const entry of idFile.ids) assert.equal(entry.addedByYou, false);
+		assert.deepEqual(idFile.ids.map((e) => e.type).sort(), ['EMAIL_ADDRESS', 'IBAN', 'PERSON']);
 		const [revealed] = await run({
 			params: revealParams(item.json.protectedText, JSON.stringify(idFile)),
 		});
@@ -581,19 +692,45 @@ describe('Protect (fake analyze)', () => {
 		assert.ok(!('idFile' in item.json));
 	});
 
-	test('includeIdFile on a map the extension would refuse names the option', async () => {
-		const error = await runError({
+	test('includeIdFile: one value under two placeholders from shared items stays loadable', async () => {
+		// Two shared items bring one value under two placeholders: as inside one flat map, the first
+		// key protects and the second becomes reveal-only, so the extension accepts the file.
+		const maps = [{ PERSON_1: 'Janez Novak' }, { PERSON_2: 'Janez Novak' }];
+		const out = await run({
+			items: [{}, {}],
+			params: (i) =>
+				protectParams({
+					options: {
+						existingPlaceholderMap: maps[i],
+						shareMapAcrossItems: true,
+						includeIdFile: true,
+					},
+				}),
+		});
+		assert.ok(out[1].json.protectedText.startsWith('[PERSON_1] wrote'));
+		assert.equal(out[1].json.placeholderMap.PERSON_2, 'Janez Novak');
+		assert.deepEqual(
+			out[1].json.idFile.revealOnly.map((r) => [r.placeholder, r.of]),
+			[['[PERSON_2]', '[PERSON_1]']],
+		);
+	});
+
+	test('one value under two keys in a flat map: the first key protects, both reveal', async () => {
+		const [item] = await run({
 			params: protectParams({
+				text: 'Hi Janez Novak',
 				options: {
 					existingPlaceholderMap: { PERSON_1: 'Janez Novak', PERSON_2: 'Janez Novak' },
 					includeIdFile: true,
 				},
 			}),
 		});
-		assert.ok(error instanceof NodeOperationError);
-		assert.match(error.message, /^Include ID File: /);
-		assert.match(error.description, /Turn off Include ID File/);
-		assert.equal(error.context.itemIndex, 0);
+		assert.equal(item.json.protectedText, 'Hi [PERSON_1]');
+		assert.equal(item.json.placeholderMap.PERSON_2, 'Janez Novak');
+		assert.deepEqual(
+			item.json.idFile.revealOnly.map((r) => r.placeholder),
+			['[PERSON_2]'],
+		);
 	});
 
 	test('includeInputFields copies the input item, results win on clashes', async () => {
@@ -636,7 +773,7 @@ describe('Include Placeholder Map (fake analyze)', () => {
 		});
 		assert.ok(!('placeholderMap' in item.json));
 		assert.ok(!('idFile' in item.json));
-		assert.match(item.json.protectedText, /^\[PERSON_[a-z0-9]{5}\] wrote from \[EMAIL_ADDRESS_/);
+		assert.match(item.json.protectedText, /^\[PERSON_[a-z0-9]{5}\] wrote from \[EMAIL_/);
 		assert.equal(item.json.entities.length, 3);
 		for (const value of ['Janez', 'ana.kovac', 'SI56']) {
 			assert.ok(!JSON.stringify(item.json).includes(value), `${value} must not be in the output`);
@@ -717,7 +854,7 @@ describe('Ignore Terms (fake analyze)', () => {
 			params: protectParams({ text: TEXT, options: { ignoreTerms: 'acme\nJanez Novak' } }),
 		});
 		const { protectedText, placeholderMap, entities } = item.json;
-		assert.ok(protectedText.startsWith('Janez Novak from Acme wrote to [EMAIL_ADDRESS_'));
+		assert.ok(protectedText.startsWith('Janez Novak from Acme wrote to [EMAIL_'));
 		// "ACME Cloud" is not equal to a term, so it is still replaced.
 		assert.match(protectedText, /about \[ORGANIZATION_[a-z0-9]{5}\]\.$/);
 		assert.deepEqual(
@@ -853,11 +990,271 @@ describe('Detect (fake analyze)', () => {
 		assert.equal(item.json.hasPersonalData, true);
 	});
 
+	test('Include Input Fields drops a stale possibleIdsTruncated from an upstream Protect', async () => {
+		const [item] = await run({
+			items: [
+				{ ticket: 7, possibleIds: [], possibleIdsTruncated: true, entityFilterIgnored: true },
+			],
+			params: detectParams({ options: { includeInputFields: true } }),
+		});
+		assert.equal(item.json.ticket, 7);
+		for (const field of ['possibleIds', 'possibleIdsTruncated', 'entityFilterIgnored']) {
+			assert.ok(!(field in item.json), `${field} is not carried over`);
+		}
+	});
+
 	test('gateway failures are mapped like Protect', async () => {
 		analyzeBehaviour.throw = new GatewayError('auth_required', 'rejected', 401);
 		const error = await runError({ params: detectParams() });
 		assert.ok(error instanceof NodeApiError);
 		assert.equal(error.message, 'The Anonymizator API key was rejected');
+	});
+});
+
+describe('Additionally Protect, possible IDs, ID sets (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	const EXTRA_TEXT =
+		'Janez Novak of Modra Vila d.o.o. paid 4.800,00 EUR for order K101. Later Janezu wrote, and Modra Vila replied.';
+
+	test('Additionally Protect: numbers, currency values and companies, local only', async () => {
+		const [item] = await run({
+			params: protectParams({
+				text: EXTRA_TEXT,
+				placeholderStyle: 'sequential',
+				options: { additionallyProtect: ['NUMBER', 'AMOUNT', 'COMPANY'] },
+			}),
+		});
+		assert.equal(
+			item.json.protectedText,
+			'[PERSON_1] of [COMPANY_1] paid [AMOUNT_1] for order [NUMBER_1]. Later Janezu wrote, and Modra Vila replied.',
+		);
+		assert.deepEqual(
+			item.json.entities.map((e) => e.entityType),
+			['PERSON', 'COMPANY', 'AMOUNT', 'NUMBER'],
+		);
+		assert.equal(item.json.placeholderMap.COMPANY_1, 'Modra Vila d.o.o.');
+		assert.equal(item.json.placeholderMap.AMOUNT_1, '4.800,00 EUR');
+		assert.equal(analyzeCalls[0].text, EXTRA_TEXT, 'the gateway gets the text only');
+		assert.equal(analyzeCalls[0].options.possible, undefined);
+		assert.ok(!('possibleIds' in item.json), 'possible IDs only with the option');
+	});
+
+	test('Additionally Protect off by default: the old output', async () => {
+		const [item] = await run({ params: protectParams({ text: EXTRA_TEXT }) });
+		assert.match(
+			item.json.protectedText,
+			/Modra Vila d\.o\.o\. paid 4\.800,00 EUR for order K101\./,
+		);
+	});
+
+	test('Include Possible IDs: variants of protected IDs, offsets into protectedText', async () => {
+		const [item] = await run({
+			params: protectParams({
+				text: EXTRA_TEXT,
+				options: { additionallyProtect: ['COMPANY'], includePossibleIds: true },
+			}),
+		});
+		const { protectedText, possibleIds } = item.json;
+		assert.deepEqual(
+			possibleIds.map((p) => [p.value, p.kind, p.type]),
+			[
+				['Janezu', 'case-form', 'PERSON'],
+				['Modra Vila', 'company-name', 'COMPANY'],
+			],
+		);
+		for (const p of possibleIds) {
+			assert.equal(protectedText.slice(p.start, p.end), p.value);
+			assert.deepEqual(Object.keys(p), ['start', 'end', 'value', 'kind', 'type']);
+		}
+		assert.ok(!('possibleIdsTruncated' in item.json));
+		// No capabilities document lists possible types, so the gateway is not asked for them.
+		assert.equal(analyzeCalls[0].options.possible, undefined);
+	});
+
+	test('Include Possible IDs asks the gateway only when the capabilities list possible types', async () => {
+		fakeCapabilities = makeCapabilities({ possible: [{ type: 'ORGANIZATION', groups: [] }] });
+		const names = Array.from({ length: 60 }, (_, i) => `Orgx${String(i).padStart(2, '0')}`);
+		const text = names.join(' ');
+		analyzeBehaviour.spans = () => [];
+		analyzeBehaviour.possible = (t) => [
+			...names.map((name) => ({
+				start: t.indexOf(name),
+				end: t.indexOf(name) + name.length,
+				entity_type: 'ORGANIZATION',
+			})),
+			// Unlisted types: 'possible spans of a type the capabilities do not list are dropped'.
+		];
+		const [item] = await run({
+			params: protectParams({ text, options: { includePossibleIds: true } }),
+		});
+		assert.equal(analyzeCalls[0].options.possible, true);
+		assert.equal(item.json.possibleIds.length, 50);
+		assert.equal(item.json.possibleIdsTruncated, true);
+		assert.deepEqual(item.json.possibleIds[0], {
+			start: 0,
+			end: 6,
+			value: 'Orgx00',
+			kind: 'detected',
+			type: 'COMPANY',
+		});
+		assert.equal(item.json.protectedText, text, 'possible IDs are never replaced');
+	});
+
+	test('Ignore Terms is the skipped test: a company term stays, and is not listed', async () => {
+		const [item] = await run({
+			params: protectParams({
+				text: EXTRA_TEXT,
+				options: {
+					additionallyProtect: ['COMPANY'],
+					includePossibleIds: true,
+					ignoreTerms: 'MODRA VILA D.O.O.',
+				},
+			}),
+		});
+		assert.match(item.json.protectedText, /of Modra Vila d\.o\.o\. paid/);
+		assert.ok(!item.json.entities.some((e) => e.entityType === 'COMPANY'));
+		assert.deepEqual(
+			item.json.possibleIds.map((p) => p.value),
+			['Janezu'],
+		);
+	});
+
+	test('entities never carry a value or a key', async () => {
+		const [item] = await run({
+			params: protectParams({ options: { includePlaceholderMap: false } }),
+		});
+		for (const entity of item.json.entities) {
+			assert.deepEqual(Object.keys(entity), ['entityType', 'placeholder', 'start', 'end', 'score']);
+		}
+	});
+
+	test('an ID file v2 with a group protects every member with the group key', async () => {
+		const idFile = {
+			format: 'anonymizator-id-file',
+			version: 2,
+			name: 'test',
+			numbering: 'random',
+			ids: [
+				{
+					value: 'Janez Novak',
+					placeholder: '[PERSON_abcde]',
+					type: 'PERSON',
+					addedByYou: false,
+					main: true,
+				},
+				{
+					value: 'J. Novak',
+					placeholder: '[PERSON_abcde]',
+					type: 'PERSON',
+					addedByYou: true,
+					main: false,
+				},
+			],
+			nameParts: [],
+			revealOnly: [],
+			usedPlaceholders: ['[PERSON_abcde]', '[PERSON_zzzzz]'],
+		};
+		const [item] = await run({
+			params: protectParams({
+				text: 'J. Novak and Janez Novak',
+				options: { existingPlaceholderMap: idFile, includeIdFile: true },
+			}),
+		});
+		assert.equal(item.json.protectedText, '[PERSON_abcde] and [PERSON_abcde]');
+		assert.equal(item.json.placeholderMap.PERSON_abcde, 'Janez Novak');
+		assert.equal(item.json.placeholderMap.PERSON_zzzzz, '', 'the tombstone stays retired');
+		assert.deepEqual(
+			item.json.idFile.ids.map((e) => [e.value, e.placeholder, e.main]),
+			[
+				['Janez Novak', '[PERSON_abcde]', true],
+				['J. Novak', '[PERSON_abcde]', false],
+			],
+		);
+	});
+
+	test('Share Map Across Items merges ID file sets; masked items still record what they found', async () => {
+		const texts = ['Janez Novak', 'Marko Horvat and Janez Novak', 'Hello'];
+		const styles = ['random', 'typed', 'random'];
+		const out = await run({
+			items: [{}, {}, {}],
+			params: (i) =>
+				protectParams({
+					text: texts[i],
+					placeholderStyle: styles[i],
+					options: { shareMapAcrossItems: true, includeIdFile: true },
+				}),
+		});
+		assert.equal(out[1].json.protectedText, '[PERSON] and [PERSON]');
+		assert.deepEqual(out[1].json.placeholderMap, {});
+		assert.ok(!('idFile' in out[1].json), 'no ID file for a masked style');
+		// The masked item's finding is in the shared set: the next pseudonymising item exports it.
+		assert.equal(out[2].json.idFile.numbering, 'random');
+		assert.deepEqual(out[2].json.idFile.ids.map((e) => e.value).sort(), [
+			'Janez Novak',
+			'Marko Horvat',
+		]);
+	});
+});
+
+describe('Detect: sanitising and possible IDs (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	test('a malformed gateway type is reported as PII', async () => {
+		analyzeBehaviour.spans = () => [{ entity_type: 'bad type', start: 0, end: 5, score: 0.5 }];
+		const [item] = await run({ params: { operation: 'detect', text: 'Janez wrote' } });
+		assert.deepEqual(item.json.countsByType, { PII: 1 });
+		assert.equal(item.json.entities[0].entityType, 'PII');
+	});
+
+	test('possible IDs: off by default; on, listed with values only with Include Values', async () => {
+		fakeCapabilities = makeCapabilities({ possible: [{ type: 'ORGANIZATION', groups: [] }] });
+		const text = 'Janez Novak works at Modra Hisa.';
+		analyzeBehaviour.possible = (t) => [
+			{ start: t.indexOf('Modra'), end: t.indexOf('.'), entity_type: 'ORGANIZATION' },
+		];
+		const [plain] = await run({ params: { operation: 'detect', text } });
+		assert.ok(!('possibleIds' in plain.json));
+		assert.equal(analyzeCalls[0].options.possible, undefined);
+
+		const [item] = await run({
+			params: { operation: 'detect', text, options: { includePossibleIds: true } },
+		});
+		assert.equal(analyzeCalls[1].options.possible, true);
+		assert.deepEqual(item.json.possibleIds, [{ entityType: 'ORGANIZATION', start: 21, end: 31 }]);
+		assert.equal(item.json.entityCount, 1, 'possible IDs are not counted');
+
+		const [valued] = await run({
+			params: {
+				operation: 'detect',
+				text,
+				options: { includePossibleIds: true, includeValues: true, ignoreTerms: 'nothing' },
+			},
+		});
+		assert.equal(valued.json.possibleIds[0].value, 'Modra Hisa');
+
+		const [ignored] = await run({
+			params: {
+				operation: 'detect',
+				text,
+				options: { includePossibleIds: true, ignoreTerms: 'modra hisa' },
+			},
+		});
+		assert.deepEqual(ignored.json.possibleIds, []);
+	});
+
+	test('possible IDs without a capabilities document: not requested, empty list', async () => {
+		const [item] = await run({
+			params: { operation: 'detect', text: 'Janez Novak', options: { includePossibleIds: true } },
+		});
+		assert.equal(analyzeCalls[0].options.possible, undefined);
+		assert.deepEqual(item.json.possibleIds, []);
+	});
+
+	test('blank text: no capabilities request either', async () => {
+		await run({ params: { operation: 'detect', text: ' ' } });
+		assert.equal(capabilitiesCalls, 0);
+		assert.equal(analyzeCalls.length, 0);
 	});
 });
 
@@ -869,10 +1266,14 @@ describe('gateway failures (fake analyze)', () => {
 		['no_access', 403, NodeApiError, /no access/],
 		['hpke_stale', 400, NodeApiError, /clock/],
 		['rate_limited', 429, NodeApiError, /Too many requests/],
-		['text_too_large', 413, NodeApiError, /too large/],
-		['server_error', 502, NodeApiError, /temporarily unavailable/],
-		['hpke_unverified_keyconfig', 200, NodeOperationError, /could not be verified/],
-		['hpke_bad_keyconfig', 200, NodeOperationError, /configuration is invalid/],
+		['text_too_large', 413, NodeApiError, /too long/],
+		['payload_too_large', 413, NodeApiError, /too long/],
+		['server_error', 502, NodeApiError, /could not process the text/],
+		['busy', 503, NodeApiError, /busy/],
+		['hpke_unverified_keyconfig', 200, NodeOperationError, /Could not verify/],
+		['hpke_stale_keyconfig', 200, NodeOperationError, /clock/],
+		['hpke_no_usable_key', 200, NodeOperationError, /Could not verify/],
+		['hpke_bad_keyconfig', 200, NodeOperationError, /Could not verify/],
 		['hpke_bad_response', 200, NodeOperationError, /could not be decrypted/],
 		['hpke_seal_failed', undefined, NodeOperationError, /could not be encrypted/],
 		['offline', undefined, NodeOperationError, /Could not reach/],
@@ -893,19 +1294,15 @@ describe('gateway failures (fake analyze)', () => {
 		});
 	}
 
-	test('a 5xx on a very large text advises splitting, not retrying', async () => {
-		// What gateway.analyze throws for a 5xx on a sealed body over LARGE_BODY_BYTES (not retried).
-		analyzeBehaviour.throw = new GatewayError(
-			'text_too_large',
-			'The Anonymizator gateway could not analyse a very large text (1000000 characters); split it into smaller items',
-			502,
-		);
+	test('a text over the cap is refused locally, with the cap from the capabilities', async () => {
+		fakeCapabilities = { ...makeCapabilities(), maxTextChars: 50000 };
+		// What gateway.analyze throws before sending anything (no HTTP status).
+		analyzeBehaviour.throw = new GatewayError('payload_too_large', 'raw');
 		const error = await runError({ params: protectParams() });
-		assert.ok(error instanceof NodeApiError);
-		assert.equal(error.httpCode, '502');
-		assert.match(error.message, /too large/);
+		assert.ok(error instanceof NodeOperationError);
+		assert.match(error.message, /too long/);
+		assert.match(error.description, /50,000 characters/);
 		assert.match(error.description, /Split the text/);
-		assert.doesNotMatch(error.description, /twice|later/);
 	});
 
 	test('continueOnFail turns the failure into an error item and keeps going', async () => {
@@ -1039,162 +1436,57 @@ describe('Reveal', () => {
 // ---------------------------------------------------------------------------------------------
 // Full stack: real gateway.ts + fake HPKE recipient behind httpRequestWithAuthentication
 
-const SUITE_ID = Buffer.from('HPKE\x00\x20\x00\x01\x00\x02', 'latin1');
-const KEM_ID = Buffer.from('KEM\x00\x20', 'latin1');
-const HPKE_V1 = Buffer.from('HPKE-v1');
-const X25519_PKCS8 = Buffer.from('302e020100300506032b656e04220420', 'hex');
-const X25519_SPKI = Buffer.from('302a300506032b656e032100', 'hex');
-
-const hmac = (key, data) =>
-	createHmac('sha256', key.length ? key : Buffer.alloc(32))
-		.update(data)
-		.digest();
-function expand(prk, info, length) {
-	const out = [];
-	let t = Buffer.alloc(0);
-	for (let i = 1; Buffer.concat(out).length < length; i++) {
-		t = hmac(prk, Buffer.concat([t, info, Buffer.from([i])]));
-		out.push(t);
-	}
-	return Buffer.concat(out).subarray(0, length);
-}
-const lExtract = (sid, salt, label, ikm) =>
-	hmac(salt, Buffer.concat([HPKE_V1, sid, Buffer.from(label), ikm]));
-const lExpand = (sid, prk, label, info, length) =>
-	expand(
-		prk,
-		Buffer.concat([
-			Buffer.from([length >> 8, length & 255]),
-			HPKE_V1,
-			sid,
-			Buffer.from(label),
-			info,
-		]),
-		length,
-	);
-
-/** A real HPKE recipient (RFC 9180 base mode, X25519/HKDF-SHA256/AES-256-GCM). */
-function makeRecipient() {
-	const { privateKey, publicKey } = generateKeyPairSync('x25519');
-	const pkR = publicKey.export({ format: 'der', type: 'spki' }).subarray(12);
-	return {
-		pkR,
-		open(frame) {
-			assert.ok(Buffer.isBuffer(frame), 'the request body must be a Buffer');
-			assert.equal(frame[0], 1);
-			const prefix = frame.subarray(0, 13);
-			const keyId = frame.readUInt32BE(1);
-			const timestamp = Number(frame.readBigUInt64BE(5));
-			const enc = frame.subarray(13, 45);
-			const ct = frame.subarray(45);
-			const pkE = createPublicKey({
-				key: Buffer.concat([X25519_SPKI, enc]),
-				format: 'der',
-				type: 'spki',
-			});
-			const dh = diffieHellman({ privateKey, publicKey: pkE });
-			const eae = lExtract(KEM_ID, Buffer.alloc(0), 'eae_prk', dh);
-			const shared = lExpand(KEM_ID, eae, 'shared_secret', Buffer.concat([enc, pkR]), 32);
-			const empty = Buffer.alloc(0);
-			const ctx = Buffer.concat([
-				Buffer.from([0]),
-				lExtract(SUITE_ID, empty, 'psk_id_hash', empty),
-				lExtract(SUITE_ID, empty, 'info_hash', empty),
-			]);
-			const secret = lExtract(SUITE_ID, shared, 'secret', empty);
-			const key = lExpand(SUITE_ID, secret, 'key', ctx, 32);
-			const nonce = lExpand(SUITE_ID, secret, 'base_nonce', ctx, 12);
-			const exporter = lExpand(SUITE_ID, secret, 'exp', ctx, 32);
-			const decipher = createDecipheriv('aes-256-gcm', key, nonce);
-			decipher.setAAD(prefix);
-			decipher.setAuthTag(ct.subarray(ct.length - 16));
-			const pt = Buffer.concat([decipher.update(ct.subarray(0, ct.length - 16)), decipher.final()]);
-			const keyNonce = lExpand(SUITE_ID, exporter, 'sec', Buffer.from('pgw response v1'), 44);
-			return {
-				keyId,
-				timestamp,
-				paddedLength: pt.length,
-				payload: JSON.parse(pt.toString('utf8').trimEnd()),
-				seal(object) {
-					const cipher = createCipheriv(
-						'aes-256-gcm',
-						keyNonce.subarray(0, 32),
-						keyNonce.subarray(32),
-					);
-					const body = Buffer.from(JSON.stringify(object).padEnd(256, ' '), 'utf8');
-					return Buffer.concat([
-						Buffer.from([1]),
-						cipher.update(body),
-						cipher.final(),
-						cipher.getAuthTag(),
-					]);
-				},
-			};
-		},
-	};
+/** UTF-16 spans -> the gateway's code-point offsets. */
+function toCodePoints(text, spans) {
+	const cp = (i) => [...text.slice(0, i)].length;
+	return spans.map((s) => ({ ...s, start: cp(s.start), end: cp(s.end) }));
 }
 
-function makeRoot() {
-	const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-	return {
-		privateKey,
-		b64url: publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64url'),
-	};
-}
-
-function signedKeyconfig(root, keyId, pkR) {
-	const keys = [
-		{
-			key_id: keyId,
-			public_key: pkR.toString('base64url'),
-			suite: { kem: 32, kdf: 1, aead: 2 },
-			not_after: '2030-01-01T00:00:00Z',
-		},
-	];
-	const message = `pgw-keyconfig-v1\n${keyId}:${keys[0].public_key}\n`;
-	return {
-		version: 1,
-		keys,
-		sig_alg: 'ed25519-v1',
-		signature: sign(null, Buffer.from(message), root.privateKey).toString('base64url'),
-	};
-}
-
-const json = (statusCode, object) => ({
-	statusCode,
-	headers: { 'content-type': 'application/json' },
-	body: Buffer.from(JSON.stringify(object)),
-});
+const NOW = Math.floor(Date.now() / 1000);
 
 /**
- * Fake gateway behind httpRequestWithAuthentication. `analyzeHandler(opened, request)` returns a
- * full response; default: seal the dictionary spans.
+ * The gateway's vector capabilities document, issued now, with ORGANIZATION as a review-only
+ * `possible` type (and its labels) and a server-only type, IT_FISCAL_CODE, that it already lists.
  */
-function makeGateway({ root, signer = root, analyzeHandler } = {}) {
-	const recipient = makeRecipient();
-	const requests = [];
-	const keyconfig = signedKeyconfig(signer, 7, recipient.pkR);
+function capabilitiesWithPossible() {
+	return capabilitiesText(NOW - 60)
+		.replace('entity=ZZZS,on,si\n', 'entity=ZZZS,on,si\npossible=ORGANIZATION,general\n')
+		.replace(
+			/(label=type:OIB,sl[^\n]*\n)/,
+			'$1label=type:ORGANIZATION,en,Organisations\nlabel=type:ORGANIZATION,sl,Organizacije\n',
+		);
+}
+
+/**
+ * Fake v2 gateway behind httpRequestWithAuthentication (independent recipient and signed keyconfig
+ * from test/helpers/pgw.mjs). `analyzeHandler(opened, request)` returns a full response; default:
+ * seal the dictionary spans (in code points, as the gateway reports them). `signer` signs the
+ * delegation instead of `root` (an unpinned root).
+ */
+function makeGateway({ root, signer = root, analyzeHandler, capabilities } = {}) {
+	const chain = makeTrustChain({ root: signer, delegated: root.delegated });
+	const fake = makeFakeGateway({
+		now: NOW,
+		chain,
+		keyId: 7,
+		...(capabilities
+			? { capabilities: () => json(200, chain.capabilities({ now: NOW, text: capabilities })) }
+			: {}),
+		analyze: (opened, request) => {
+			if (analyzeHandler) return analyzeHandler(opened, request);
+			const text = opened.payload.text;
+			return octet(
+				200,
+				opened.seal({ entities: toCodePoints(text, detect(text, opened.payload.entities)) }),
+			);
+		},
+	});
+	const helper = fake.ctx.helpers.httpRequestWithAuthentication;
 	async function http(credentialName, options) {
 		assert.equal(this, ctxRef.current, 'helper must be called with the execute context as this');
-		assert.equal(credentialName, 'anonymizatorApi');
-		assert.equal(options.disableFollowRedirect, true);
-		requests.push(options);
-		const url = `${options.baseURL ?? ''}${options.url}`;
-		if (options.method === 'GET' && url === 'https://anon.prosecco37.com/v1/keyconfig') {
-			return json(200, keyconfig);
-		}
-		if (options.method === 'POST' && url === 'https://anon.prosecco37.com/v1/analyze') {
-			const opened = recipient.open(options.body);
-			if (analyzeHandler) return analyzeHandler(opened, options);
-			return {
-				statusCode: 200,
-				headers: { 'content-type': 'application/octet-stream' },
-				body: opened.seal({ entities: detect(opened.payload.text, opened.payload.entities) }),
-			};
-		}
-		return json(404, { error: 'not_found' });
+		return helper.call(fake.ctx, credentialName, options);
 	}
-	return { http, requests, recipient };
+	return { http, requests: fake.requests, recipient: fake.recipient };
 }
 
 const ctxRef = { current: undefined };
@@ -1217,12 +1509,15 @@ async function runFullError(setup) {
 }
 
 describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
-	const root = makeRoot();
+	const root = Object.assign(ed25519Signer(), { delegated: ed25519Signer() });
+
+	const seams = { trustRootsB64url: [root.publicKey], retryDelayMs: 1 };
 
 	beforeEach(() => {
-		gateway.analyze = (ctx, text, entityTypes) =>
-			realAnalyze(ctx, text, entityTypes, { trustRootB64url: root.b64url, retryDelayMs: 1 });
-		gateway.clearKeyconfigCache();
+		gateway.analyze = (ctx, text, entityTypes, options) =>
+			realAnalyze(ctx, text, entityTypes, { ...options, ...seams });
+		gateway.fetchCapabilities = (ctx) => realFetchCapabilities(ctx, seams);
+		gateway.clearGatewayCaches();
 	});
 
 	test('protect seals the text, the body carries no plaintext, offsets survive emoji', async () => {
@@ -1320,10 +1615,10 @@ describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
 	});
 
 	test('a keyconfig not signed by the trust root fails closed: nothing is sent', async () => {
-		const fake = makeGateway({ root, signer: makeRoot() });
+		const fake = makeGateway({ root, signer: ed25519Signer() });
 		const error = await runFullError({ params: protectParams(), http: fake.http });
 		assert.ok(error instanceof NodeOperationError);
-		assert.match(error.message, /could not be verified/);
+		assert.match(error.message, /Could not verify/);
 		assert.equal(fake.requests.filter((r) => r.method === 'POST').length, 0);
 	});
 
@@ -1358,6 +1653,132 @@ describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
 		);
 	});
 
+	test('capabilities: verified once, cached; no possible member unless asked for', async () => {
+		let seen;
+		const fake = makeGateway({
+			root,
+			capabilities: capabilitiesWithPossible(),
+			analyzeHandler: (opened) => {
+				seen = opened.payload;
+				return octet(200, opened.seal({ entities: [] }));
+			},
+		});
+		await runFull({ items: [{}, {}], params: protectParams(), http: fake.http });
+		assert.ok(!('possible' in seen), 'the request is unchanged without Include Possible IDs');
+		assert.equal(fake.requests.filter((r) => r.url.endsWith('/v1/capabilities')).length, 1);
+	});
+
+	test('Include Possible IDs: possible requested, gateway values listed in protectedText', async () => {
+		let seen;
+		const text = 'Janez Novak works at Modra Hiša in Ljubljana.';
+		const fake = makeGateway({
+			root,
+			capabilities: capabilitiesWithPossible(),
+			analyzeHandler: (opened) => {
+				seen = opened.payload;
+				const t = opened.payload.text;
+				const org = t.indexOf('Modra Hiša');
+				return octet(
+					200,
+					opened.seal({
+						entities: toCodePoints(t, detect(t)),
+						possible: [{ start: org, end: org + 10, entity_type: 'ORGANIZATION' }],
+					}),
+				);
+			},
+		});
+		const [item] = await runFull({
+			params: protectParams({ text, options: { includePossibleIds: true } }),
+			http: fake.http,
+		});
+		assert.equal(seen.possible, true);
+		const { protectedText, possibleIds } = item.json;
+		assert.deepEqual(
+			possibleIds.map((p) => [p.value, p.kind, p.type, protectedText.slice(p.start, p.end)]),
+			[['Modra Hiša', 'detected', 'COMPANY', 'Modra Hiša']],
+		);
+		assert.ok(!('possibleIdsTruncated' in item.json));
+		assert.ok(!('of' in possibleIds[0]));
+	});
+
+	test('Detect with Include Possible IDs: review-only spans, original offsets, not counted', async () => {
+		const text = '😀 Janez Novak works at Modra Hiša.';
+		const fake = makeGateway({
+			root,
+			capabilities: capabilitiesWithPossible(),
+			analyzeHandler: (opened) => {
+				const t = opened.payload.text;
+				const org = [...t].join('').indexOf('Modra Hiša');
+				return octet(
+					200,
+					opened.seal({
+						entities: toCodePoints(t, detect(t)),
+						possible: toCodePoints(t, [{ start: org, end: org + 10, entity_type: 'ORGANIZATION' }]),
+					}),
+				);
+			},
+		});
+		const [item] = await runFull({
+			params: { operation: 'detect', text, options: { includePossibleIds: true } },
+			http: fake.http,
+		});
+		assert.equal(item.json.entityCount, 1);
+		assert.deepEqual(item.json.possibleIds, [
+			{ entityType: 'ORGANIZATION', start: text.indexOf('Modra'), end: text.indexOf('.', 20) },
+		]);
+	});
+
+	test('getEntityTypes: bundled rows plus the server-only types of the verified document', async () => {
+		const fake = makeGateway({ root, capabilities: capabilitiesWithPossible() });
+		const ctx = withCredential(makeCtx({ params: {}, http: fake.http }));
+		ctxRef.current = ctx;
+		const options = await new Anonymizator().methods.loadOptions.getEntityTypes.call(ctx);
+		const values = options.map((o) => o.value);
+		for (const row of ENTITY_CATALOG) assert.ok(values.includes(row.id), row.id);
+		assert.ok(values.includes('IT_FISCAL_CODE'));
+		assert.ok(values.includes('SOCIAL_HANDLE'));
+		assert.ok(!values.includes('IBAN_CODE'), 'covered by the IBAN row');
+		assert.ok(!values.includes('ORGANIZATION'), 'possible types never become rows');
+		const names = options.map((o) => o.name);
+		assert.deepEqual(
+			names,
+			[...names].sort((a, b) => a.localeCompare(b, 'en')),
+		);
+		assert.equal(options.find((o) => o.value === 'PERSON').name, 'Names');
+		assert.match(options.find((o) => o.value === 'IBAN').description, /IBAN, IBAN_CODE/);
+	});
+
+	test('getEntityTypes falls back to the bundled catalog when nothing verifies', async () => {
+		const fake = makeGateway({
+			root,
+			signer: ed25519Signer(),
+			capabilities: capabilitiesWithPossible(),
+		});
+		const ctx = withCredential(makeCtx({ params: {}, http: fake.http }));
+		ctxRef.current = ctx;
+		const options = await new Anonymizator().methods.loadOptions.getEntityTypes.call(ctx);
+		assert.deepEqual(options.map((o) => o.value).sort(), ENTITY_CATALOG.map((r) => r.id).sort());
+	});
+
+	test('getEntityTypes without a credential: bundled rows, no request, no held failure', async () => {
+		const fake = makeGateway({ root, capabilities: capabilitiesWithPossible() });
+		const bare = makeCtx({ params: {}, http: fake.http });
+		bare.getCredentials = async () => {
+			throw new Error('Node does not have any credentials set');
+		};
+		ctxRef.current = bare;
+		const getEntityTypes = new Anonymizator().methods.loadOptions.getEntityTypes;
+		const before = await getEntityTypes.call(bare);
+		assert.deepEqual(before.map((o) => o.value).sort(), ENTITY_CATALOG.map((r) => r.id).sort());
+		assert.equal(fake.requests.length, 0);
+		// Selecting a credential right after gives the server rows, not a held fallback.
+		const ctx = withCredential(makeCtx({ params: {}, http: fake.http }));
+		ctxRef.current = ctx;
+		const after = (await getEntityTypes.call(ctx)).map((o) => o.value);
+		assert.ok(after.includes('IT_FISCAL_CODE'));
+		assert.ok(after.includes('SOCIAL_HANDLE'));
+	});
+
 	test('reveal makes no request even when a helper is available', async () => {
 		const fake = makeGateway({ root });
 		const [item] = await runFull({
@@ -1366,5 +1787,624 @@ describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
 		});
 		assert.equal(item.json.revealedText, 'Janez Novak');
 		assert.equal(fake.requests.length, 0);
+	});
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review findings (actions cluster): each test reproduces one confirmed scenario.
+
+describe('review fixes: ID files, shared maps, stale input fields (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	const { outputMap } = require(`${DIST}actions/protect.js`);
+	const { parsePlaceholderMap } = require(`${DIST}shared/placeholderMap.js`);
+
+	/** An extension ID file v2 with one group: PERSON_aaaaa = Janez Novak (main) + J. Novak. */
+	const GROUP_FILE = {
+		format: 'anonymizator-id-file',
+		version: 2,
+		name: 'group',
+		numbering: 'random',
+		ids: [
+			{
+				value: 'Janez Novak',
+				placeholder: '[PERSON_aaaaa]',
+				type: 'PERSON',
+				addedByYou: false,
+				main: true,
+			},
+			{
+				value: 'J. Novak',
+				placeholder: '[PERSON_aaaaa]',
+				type: 'PERSON',
+				addedByYou: true,
+				main: false,
+			},
+		],
+		nameParts: [],
+		revealOnly: [{ placeholder: '[PERSON_old00]', value: 'Janez N.', of: '[PERSON_aaaaa]' }],
+		usedPlaceholders: ['[PERSON_aaaaa]', '[PERSON_old00]'],
+	};
+
+	// #1
+	test('outputMap is linear in records and name parts, main key first then its parts', () => {
+		const n = 2000; // the old nested loop took about 15 s here
+		const ids = [];
+		const subKeys = {};
+		for (let i = 0; i < n; i++) {
+			ids.unshift({
+				value: `Ime${i} Priimek${i}`,
+				key: `PERSON_${i + 1}`,
+				type: 'PERSON',
+				mine: false,
+				main: true,
+			});
+			subKeys[`PERSON_${i + 1}_NAME`] = {
+				of: `PERSON_${i + 1}`,
+				value: `Ime${i}`,
+				rec: `Ime${i} Priimek${i}`,
+			};
+			subKeys[`PERSON_${i + 1}_SURNAME`] = {
+				of: `PERSON_${i + 1}`,
+				value: `Priimek${i}`,
+				rec: `Ime${i} Priimek${i}`,
+			};
+		}
+		const state = { numbering: 'sequential', ids, subKeys, aliases: {}, used: ['PERSON_0'] };
+		const started = Date.now();
+		const map = outputMap(state);
+		const elapsed = Date.now() - started;
+		assert.ok(elapsed < 1000, `outputMap took ${elapsed} ms for ${n} persons`);
+		const keys = Object.keys(map);
+		assert.equal(keys.length, 3 * n + 1);
+		assert.deepEqual(keys.slice(0, 6), [
+			'PERSON_1',
+			'PERSON_1_NAME',
+			'PERSON_1_SURNAME',
+			'PERSON_2',
+			'PERSON_2_NAME',
+			'PERSON_2_SURNAME',
+		]);
+		assert.equal(map.PERSON_0, '', 'retired keys come last, empty');
+	});
+
+	// #8 (and #5)
+	for (const style of ['typed', 'redacted']) {
+		test(`Include ID File adds no idFile for ${style} (old contract), even with a group file`, async () => {
+			const [plain] = await run({
+				params: protectParams({ placeholderStyle: style, options: { includeIdFile: true } }),
+			});
+			assert.ok(!('idFile' in plain.json));
+			assert.ok(!JSON.stringify(plain.json).includes('Janez'), 'no real value in the output');
+
+			const [grouped] = await run({
+				params: protectParams({
+					text: 'J. Novak and Janez Novak, ana.kovac@example.com',
+					placeholderStyle: style,
+					options: { existingPlaceholderMap: GROUP_FILE, includeIdFile: true },
+				}),
+			});
+			const mask = style === 'typed' ? '[PERSON]' : '[REDACTED]';
+			const email = style === 'typed' ? '[EMAIL]' : '[REDACTED]';
+			assert.equal(grouped.json.protectedText, `${mask} and ${mask}, ${email}`);
+			assert.deepEqual(grouped.json.placeholderMap, {});
+			assert.ok(!('idFile' in grouped.json));
+		});
+	}
+
+	test('Include ID File still adds a v2 file for Random and Numbers in Order, groups included', async () => {
+		for (const style of ['random', 'sequential']) {
+			const [item] = await run({
+				params: protectParams({
+					text: 'J. Novak and Janez Novak',
+					placeholderStyle: style,
+					options: { existingPlaceholderMap: GROUP_FILE, includeIdFile: true },
+				}),
+			});
+			assert.equal(item.json.protectedText, '[PERSON_aaaaa] and [PERSON_aaaaa]');
+			assert.equal(item.json.idFile.numbering, style);
+			assert.ok(parsePlaceholderMap(item.json.idFile).set, 'the file loads again');
+		}
+	});
+
+	test('a shared run mixing masked and pseudonymising styles never crashes Include ID File', async () => {
+		const styles = ['random', 'typed', 'redacted', 'sequential'];
+		const texts = [
+			'J. Novak wrote',
+			'Marko Horvat and Janez Novak',
+			'ana.kovac@example.com',
+			'Janez Novak again',
+		];
+		const out = await run({
+			items: styles.map(() => ({})),
+			params: (i) =>
+				protectParams({
+					text: texts[i],
+					placeholderStyle: styles[i],
+					options: {
+						shareMapAcrossItems: true,
+						includeIdFile: true,
+						existingPlaceholderMap: i === 0 ? GROUP_FILE : {},
+					},
+				}),
+		});
+		assert.equal(out[0].json.protectedText, '[PERSON_aaaaa] wrote');
+		assert.ok(!('idFile' in out[1].json));
+		assert.ok(!('idFile' in out[2].json));
+		assert.equal(out[1].json.protectedText, '[PERSON] and [PERSON]');
+		const last = out[3].json;
+		assert.equal(last.protectedText, '[PERSON_aaaaa] again');
+		const values = last.idFile.ids.map((e) => e.value);
+		for (const v of ['Janez Novak', 'J. Novak', 'Marko Horvat', 'ana.kovac@example.com']) {
+			assert.ok(values.includes(v), `${v} recorded in the shared set`);
+		}
+		assert.ok(parsePlaceholderMap(last.idFile).set);
+	});
+
+	// #11, #30
+	test('Protect with Include Input Fields drops stale possibleIds, possibleIdsTruncated, entityFilterIgnored and idFile', async () => {
+		const stale = {
+			ticket: 9,
+			possibleIds: [{ start: 18, end: 24, value: 'Zupanu', kind: 'case-form', type: 'PERSON' }],
+			possibleIdsTruncated: true,
+			entityFilterIgnored: true,
+			idFile: { format: 'anonymizator-id-file', version: 2 },
+		};
+		const [on] = await run({
+			items: [stale],
+			params: protectParams({
+				text: 'Janez Novak met Mr. Novak',
+				options: { includeInputFields: true, includePossibleIds: true },
+			}),
+		});
+		assert.equal(on.json.ticket, 9);
+		assert.deepEqual(
+			on.json.possibleIds.map((p) => p.value),
+			['Mr. Novak'],
+		);
+		assert.ok(!('possibleIdsTruncated' in on.json), 'this run was not capped');
+		assert.ok(!('entityFilterIgnored' in on.json), 'this run sent no filter');
+		assert.ok(!('idFile' in on.json), 'no ID file was asked for');
+
+		const [off] = await run({
+			items: [stale],
+			params: protectParams({ text: 'Nothing here.', options: { includeInputFields: true } }),
+		});
+		assert.equal(off.json.protectedText, 'Nothing here.');
+		for (const field of ['possibleIds', 'possibleIdsTruncated', 'entityFilterIgnored', 'idFile']) {
+			assert.ok(!(field in off.json), `${field} is not carried over`);
+		}
+	});
+
+	test('Detect with Include Input Fields drops stale possibleIds and entityFilterIgnored', async () => {
+		const [item] = await run({
+			items: [
+				{
+					ticket: 9,
+					possibleIds: [{ entityType: 'X', start: 0, end: 3 }],
+					entityFilterIgnored: true,
+				},
+			],
+			params: { operation: 'detect', text: 'Janez Novak', options: { includeInputFields: true } },
+		});
+		assert.equal(item.json.ticket, 9);
+		assert.equal(item.json.entityCount, 1);
+		assert.ok(!('possibleIds' in item.json));
+		assert.ok(!('entityFilterIgnored' in item.json));
+	});
+
+	// #13
+	test('Share Map: a later live key that is only reveal-only in the shared set takes it back', async () => {
+		const file = {
+			format: 'anonymizator-id-file',
+			version: 2,
+			name: 'alias',
+			numbering: 'random',
+			ids: [
+				{
+					value: 'Janez Novak-Kos',
+					placeholder: '[PERSON_new12]',
+					type: 'PERSON',
+					addedByYou: false,
+					main: true,
+				},
+			],
+			nameParts: [],
+			revealOnly: [{ placeholder: '[PERSON_old12]', value: 'Janez Novak', of: '[PERSON_new12]' }],
+			usedPlaceholders: ['[PERSON_new12]', '[PERSON_old12]'],
+		};
+		analyzeBehaviour.spans = () => [];
+		const maps = [file, { PERSON_old12: 'Janez Novak' }];
+		const texts = ['Hello', 'Mail Janez Novak today'];
+		for (const share of [false, true]) {
+			const out = await run({
+				items: [{}, {}],
+				params: (i) =>
+					protectParams({
+						text: texts[i],
+						options: {
+							shareMapAcrossItems: share,
+							existingPlaceholderMap: maps[i],
+							includeIdFile: true,
+						},
+					}),
+			});
+			assert.equal(out[1].json.protectedText, 'Mail [PERSON_old12] today', `share ${share}`);
+			assert.equal(out[1].json.placeholderMap.PERSON_old12, 'Janez Novak');
+			assert.ok(parsePlaceholderMap(out[1].json.idFile).set);
+		}
+	});
+
+	// #19
+	test('Share Map: the same seed on every item is kept once (flat map and ID file v2)', async () => {
+		const flat = { PERSON_aaaaa: 'Janez Novak', EMAIL_bbbbb: 'ana.kovac@example.com' };
+		const seeds = {
+			flat,
+			'ID file v2': {
+				format: 'anonymizator-id-file',
+				version: 2,
+				name: 'seed',
+				numbering: 'random',
+				ids: [
+					{
+						value: 'Janez Novak',
+						placeholder: '[PERSON_aaaaa]',
+						type: 'PERSON',
+						addedByYou: false,
+						main: true,
+					},
+					{
+						value: 'ana.kovac@example.com',
+						placeholder: '[EMAIL_bbbbb]',
+						type: 'EMAIL_ADDRESS',
+						addedByYou: false,
+						main: true,
+					},
+				],
+				nameParts: [],
+				revealOnly: [],
+				usedPlaceholders: ['[PERSON_aaaaa]', '[EMAIL_bbbbb]'],
+			},
+		};
+		for (const [label, seed] of Object.entries(seeds)) {
+			const out = await run({
+				items: [{}, {}, {}],
+				params: () =>
+					protectParams({
+						text: 'Janez Novak, ana.kovac@example.com',
+						options: {
+							shareMapAcrossItems: true,
+							includeIdFile: true,
+							existingPlaceholderMap: seed,
+						},
+					}),
+			});
+			for (const item of out) {
+				assert.equal(item.json.protectedText, '[PERSON_aaaaa], [EMAIL_bbbbb]', label);
+				const placeholders = item.json.idFile.ids.map((e) => e.placeholder).sort();
+				assert.deepEqual(placeholders, ['[EMAIL_bbbbb]', '[PERSON_aaaaa]'], label);
+			}
+		}
+	});
+
+	// #20
+	test('Share Map: a name part or reveal-only key reused for another value fails that item', async () => {
+		const out = await run({
+			items: [{}, {}],
+			continueOnFail: true,
+			params: (i) =>
+				protectParams({
+					text: i === 0 ? 'Janez Novak wrote' : 'Marko said hi',
+					placeholderStyle: 'sequential',
+					options: {
+						shareMapAcrossItems: true,
+						existingPlaceholderMap: i === 0 ? {} : { PERSON_1_NAME: 'Marko' },
+					},
+				}),
+		});
+		assert.equal(out[0].json.protectedText, '[PERSON_1] wrote');
+		assert.match(out[1].json.error, /PERSON_1_NAME already stands for a different value/);
+
+		const aliased = await run({
+			items: [{}, {}],
+			continueOnFail: true,
+			params: (i) =>
+				protectParams({
+					text: 'Hello',
+					options: {
+						shareMapAcrossItems: true,
+						existingPlaceholderMap: i === 0 ? GROUP_FILE : { PERSON_old00: 'Marko Horvat' },
+					},
+				}),
+		});
+		assert.match(aliased[1].json.error, /PERSON_old00 already stands for a different value/);
+	});
+
+	// #22, #36
+	test('Share Map: a later item’s retired keys stay retired in the shared map', async () => {
+		const out = await run({
+			items: [{}, {}],
+			params: (i) =>
+				protectParams({
+					text: i === 0 ? 'hello' : 'Janez Novak',
+					placeholderStyle: 'sequential',
+					options: {
+						shareMapAcrossItems: true,
+						existingPlaceholderMap: i === 0 ? {} : { PERSON_1: 'Ana Kos', PERSON_2: '' },
+					},
+				}),
+		});
+		assert.equal(out[1].json.protectedText, '[PERSON_3]');
+		assert.equal(out[1].json.placeholderMap.PERSON_2, '');
+		assert.equal(out[1].json.placeholderMap.PERSON_3, 'Janez Novak');
+
+		const above = await run({
+			items: [{}, {}],
+			params: (i) =>
+				protectParams({
+					text: i === 0 ? 'Janez Novak' : 'Marko Horvat',
+					placeholderStyle: 'sequential',
+					options: {
+						shareMapAcrossItems: true,
+						existingPlaceholderMap: i === 0 ? {} : { PERSON_5: 'Ana Kos', PERSON_6: '' },
+					},
+				}),
+		});
+		assert.equal(above[1].json.protectedText, '[PERSON_7]');
+		assert.equal(above[1].json.placeholderMap.PERSON_6, '');
+	});
+
+	// #26
+	test('Share Map: one value under a second key in a later item becomes reveal-only', async () => {
+		const out = await run({
+			items: [{}, {}],
+			params: (i) =>
+				protectParams({
+					text: 'Mail ana.kovac@example.com',
+					options: {
+						shareMapAcrossItems: true,
+						includeIdFile: true,
+						existingPlaceholderMap: i === 0 ? {} : { EMAIL_1: 'ana.kovac@example.com' },
+					},
+				}),
+		});
+		const key = keyFor(out[0].json.placeholderMap, 'ana.kovac@example.com');
+		assert.match(key, /^EMAIL_[a-z0-9]{5}$/);
+		assert.equal(out[1].json.protectedText, `Mail [${key}]`);
+		assert.equal(out[1].json.placeholderMap.EMAIL_1, 'ana.kovac@example.com');
+		assert.deepEqual(
+			out[1].json.idFile.revealOnly.map((r) => [r.placeholder, r.of]),
+			[['[EMAIL_1]', `[${key}]`]],
+		);
+		const [revealed] = await run({
+			params: revealParams('[EMAIL_1] [' + key + ']', out[1].json.idFile),
+		});
+		assert.equal(revealed.json.revealedText, 'ana.kovac@example.com ana.kovac@example.com');
+	});
+
+	test('Share Map: name parts of a key that became reveal-only never orphan the shared set', async () => {
+		const maps = [
+			{ PERSON_1: 'Janez Novak', PERSON_2: 'Janez Novak' },
+			{ PERSON_2: 'Janez Novak', PERSON_2_NAME: 'Janez', PERSON_2_SURNAME: 'Novak' },
+			{},
+		];
+		const out = await run({
+			items: [{}, {}, {}],
+			params: (i) =>
+				protectParams({
+					text: i === 2 ? 'Marko Horvat' : 'Janez Novak',
+					placeholderStyle: 'sequential',
+					options: {
+						shareMapAcrossItems: true,
+						includeIdFile: true,
+						existingPlaceholderMap: maps[i],
+					},
+				}),
+		});
+		assert.equal(out[1].json.protectedText, '[PERSON_1]');
+		assert.equal(out[1].json.placeholderMap.PERSON_2, 'Janez Novak');
+		assert.equal(out[1].json.placeholderMap.PERSON_2_NAME, 'Janez');
+		assert.equal(out[2].json.protectedText, '[PERSON_3]');
+		for (const item of out) assert.ok(parsePlaceholderMap(item.json.idFile).set);
+		const [revealed] = await run({
+			params: revealParams('[PERSON_2_NAME] [PERSON_2]', out[2].json.placeholderMap),
+		});
+		assert.equal(revealed.json.revealedText, 'Janez Janez Novak');
+	});
+
+	test('Share Map: a later group whose main value is already shared joins the shared key', async () => {
+		const out = await run({
+			items: [{}, {}],
+			params: (i) =>
+				protectParams({
+					text: i === 0 ? 'Hello' : 'J. Novak and Janez Novak',
+					placeholderStyle: 'sequential',
+					options: {
+						shareMapAcrossItems: true,
+						includeIdFile: true,
+						existingPlaceholderMap: i === 0 ? { PERSON_1: 'Janez Novak' } : GROUP_FILE,
+					},
+				}),
+		});
+		const item = out[1].json;
+		assert.equal(item.protectedText, '[PERSON_1] and [PERSON_1]');
+		assert.equal(item.placeholderMap.PERSON_aaaaa, 'Janez Novak');
+		assert.equal(item.placeholderMap.PERSON_old00, 'Janez N.');
+		assert.deepEqual(item.idFile.ids.map((e) => [e.value, e.placeholder, e.main]).sort(), [
+			['J. Novak', '[PERSON_1]', false],
+			['Janez Novak', '[PERSON_1]', true],
+		]);
+		assert.ok(parsePlaceholderMap(item.idFile).set);
+	});
+
+	// #33
+	test('Share Map: reveal-only placeholders of a later item’s map are merged and reveal', async () => {
+		const seeds = [
+			{ PERSON_aaaaa: 'Janez Novak', PERSON_bbbbb: 'Janez Novak' },
+			{
+				format: 'anonymizator-id-file',
+				version: 2,
+				name: 'aliases',
+				numbering: 'random',
+				ids: [
+					{
+						value: 'Janez Novak',
+						placeholder: '[PERSON_aaaaa]',
+						type: 'PERSON',
+						addedByYou: false,
+						main: true,
+					},
+				],
+				nameParts: [],
+				revealOnly: [{ placeholder: '[PERSON_bbbbb]', value: 'Janez Novak', of: '[PERSON_aaaaa]' }],
+				usedPlaceholders: ['[PERSON_aaaaa]', '[PERSON_bbbbb]'],
+			},
+		];
+		for (const seed of seeds) {
+			const out = await run({
+				items: [{}, {}, {}],
+				params: (i) =>
+					protectParams({
+						text: 'Hello',
+						options: { shareMapAcrossItems: true, existingPlaceholderMap: i === 1 ? seed : {} },
+					}),
+			});
+			for (const item of out.slice(1)) {
+				assert.equal(item.json.placeholderMap.PERSON_bbbbb, 'Janez Novak');
+			}
+			const [revealed] = await run({
+				params: revealParams('Hi [PERSON_bbbbb]', out[2].json.placeholderMap),
+			});
+			assert.equal(revealed.json.revealedText, 'Hi Janez Novak');
+		}
+	});
+
+	// #35
+	test('Additionally Protect from an expression: case and spaces are folded', async () => {
+		for (const raw of ['number, amount', ['Number', ' amount '], 'NUMBER\nAMOUNT']) {
+			const [item] = await run({
+				params: protectParams({
+					text: 'Invoice K101 for 4.800,00 EUR',
+					placeholderStyle: 'sequential',
+					options: { additionallyProtect: raw },
+				}),
+			});
+			assert.equal(
+				item.json.protectedText,
+				'Invoice [NUMBER_1] for [AMOUNT_1]',
+				JSON.stringify(raw),
+			);
+		}
+	});
+
+	test('Additionally Protect from an expression: an unknown value is refused, naming the option', async () => {
+		for (const raw of [['All Numbers'], 'numbers', { NUMBER: true }, 5]) {
+			const error = await runError({
+				params: protectParams({ text: 'Invoice K101', options: { additionallyProtect: raw } }),
+			});
+			assert.ok(error instanceof NodeOperationError, JSON.stringify(raw));
+			assert.match(error.message, /Additionally Protect/);
+			assert.match(error.description, /NUMBER, AMOUNT, COMPANY/);
+			assert.equal(analyzeCalls.length, 0, 'nothing is sent');
+		}
+		for (const raw of ['', [], null]) {
+			const [item] = await run({
+				params: protectParams({ text: 'Invoice K101', options: { additionallyProtect: raw } }),
+			});
+			assert.equal(item.json.protectedText, 'Invoice K101');
+		}
+	});
+});
+
+describe('review fixes: Detect matches Protect (fake analyze)', () => {
+	beforeEach(installFakeAnalyze);
+
+	const detectRun = (text, options = {}) =>
+		run({ params: { operation: 'detect', text, options: { includeValues: true, ...options } } });
+
+	// #17
+	test('an ignored name inside a company with a legal form is still reported, as Protect replaces it', async () => {
+		const text = 'Invoice for Modra d.o.o. is attached';
+		analyzeBehaviour.spans = () => [{ entity_type: 'LOCATION', start: 12, end: 17, score: 0.85 }];
+		const [detected] = await detectRun(text, { ignoreTerms: 'Modra' });
+		const [protectedItem] = await run({
+			params: protectParams({ text, options: { ignoreTerms: 'Modra' } }),
+		});
+		assert.match(
+			protectedItem.json.protectedText,
+			/^Invoice for \[COMPANY_[a-z0-9]{5}\] is attached$/,
+		);
+		assert.equal(detected.json.hasPersonalData, true);
+		assert.deepEqual(detected.json.entities, [
+			{ entityType: 'COMPANY', start: 12, end: 24, score: 0.85, value: 'Modra d.o.o.' },
+		]);
+		const [exact] = await detectRun(text, { ignoreTerms: 'Modra d.o.o.' });
+		assert.equal(exact.json.hasPersonalData, false, 'the whole company as a term is ignored');
+	});
+
+	// #32
+	test('span edges are trimmed and whitespace-only spans dropped, as Protect does', async () => {
+		analyzeBehaviour.spans = () => [{ entity_type: 'PERSON', start: 3, end: 15, score: 0.9 }];
+		const [edge] = await detectRun('Hi\nJanez Novak\n\nThanks');
+		assert.deepEqual(edge.json.entities, [
+			{ entityType: 'PERSON', start: 3, end: 14, score: 0.9, value: 'Janez Novak' },
+		]);
+
+		analyzeBehaviour.spans = () => [{ entity_type: 'LOCATION', start: 22, end: 24, score: 0.9 }];
+		const [blank] = await detectRun('Thanks for the update.\n\nSee you');
+		assert.equal(blank.json.hasPersonalData, false);
+		assert.equal(blank.json.entityCount, 0);
+
+		const text = 'Janez Novak\nLjubljana';
+		analyzeBehaviour.spans = () => [
+			{ entity_type: 'PERSON', start: 0, end: 12, score: 0.9 },
+			{ entity_type: 'LOCATION', start: 11, end: 21, score: 0.9 },
+		];
+		const [both] = await detectRun(text);
+		assert.deepEqual(
+			both.json.entities.map((e) => [e.entityType, e.value]),
+			[
+				['PERSON', 'Janez Novak'],
+				['LOCATION', 'Ljubljana'],
+			],
+		);
+		const [protectedItem] = await run({ params: protectParams({ text }) });
+		assert.equal(protectedItem.json.entities.length, both.json.entityCount);
+	});
+
+	test('possible IDs are trimmed too, blank ones dropped', async () => {
+		fakeCapabilities = makeCapabilities({ possible: [{ type: 'ORGANIZATION', groups: [] }] });
+		const text = 'See  Modra Hisa \n and \n\n';
+		analyzeBehaviour.spans = () => [];
+		analyzeBehaviour.possible = () => [
+			{ start: 4, end: 17, entity_type: 'ORGANIZATION' },
+			{ start: 22, end: 24, entity_type: 'ORGANIZATION' },
+		];
+		const [item] = await detectRun(text, { includePossibleIds: true });
+		assert.deepEqual(item.json.possibleIds, [
+			{ entityType: 'ORGANIZATION', start: 5, end: 15, value: 'Modra Hisa' },
+		]);
+	});
+
+	// #27
+	test('possible spans of a type the capabilities do not list are dropped (Protect and Detect)', async () => {
+		fakeCapabilities = makeCapabilities({ possible: [{ type: 'ORGANIZATION', groups: [] }] });
+		const text = 'Ljubljana is nice, Orgx works here.';
+		analyzeBehaviour.spans = () => [];
+		analyzeBehaviour.possible = (t) => [
+			{ start: 0, end: 9, entity_type: 'OTHER' },
+			{ start: t.indexOf('Orgx'), end: t.indexOf('Orgx') + 4, entity_type: 'ORGANIZATION' },
+		];
+		const [detected] = await detectRun(text, { includePossibleIds: true });
+		assert.deepEqual(detected.json.possibleIds, [
+			{ entityType: 'ORGANIZATION', start: 19, end: 23, value: 'Orgx' },
+		]);
+		const [protectedItem] = await run({
+			params: protectParams({ text, options: { includePossibleIds: true } }),
+		});
+		assert.deepEqual(
+			protectedItem.json.possibleIds.map((p) => p.value),
+			['Orgx'],
+		);
 	});
 });

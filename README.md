@@ -11,8 +11,9 @@ Names, locations and similar free-text data are found with **named-entity recogn
 statistical model that recognises them from their context in the sentence rather than from a fixed
 pattern; regional identifiers such as EMŠO, OIB and IBAN are found by recognisers that validate the
 number. The text is end-to-end encrypted (HPKE) to the gateway, which returns only the positions of
-what it found and keeps nothing. Everything else happens inside n8n: the placeholders, the map, masking and Reveal.
-Reveal never contacts the gateway and needs no credential. [What leaves n8n](#what-leaves-n8n) lists
+what it found and keeps nothing. Everything else happens inside n8n: the placeholders, the map,
+masking, the optional extra rules for numbers, amounts and company names, and Reveal. Reveal never
+contacts the gateway and needs no credential. [What leaves n8n](#what-leaves-n8n) lists
 exactly what is sent.
 
 The node name is **Anonymizator**; the credential is **Anonymizator API**.
@@ -61,34 +62,36 @@ credential.
 | --- | --- |
 | **Text** | The text to protect. Usually an expression such as `{{ $json.body }}`. |
 | **Detect** | **All Types** (default) or **Selected Types**. All Types lets the gateway use every type it supports, including types added later. |
-| **Entity Types** | Shown for Selected Types. Person names, email addresses, phone numbers, credit card numbers, bank accounts (IBAN), US Social Security numbers, API keys, URLs, Slovenian personal ID (EMŠO), Slovenian tax number, Slovenian health insurance number (ZZZS), Croatian personal ID (OIB), Austrian social insurance number, birth dates, locations, IP addresses. Selecting every type is the same as All Types. |
-| **Placeholder Style** | **Random** (default), **Sequential**, **Type Only** or **Redacted**. See [Which placeholders to use](#which-placeholders-to-use). |
+| **Entity Type Names or IDs** | Shown for Selected Types. The node's built-in types, with the browser extension's names: Names, Email addresses, Phone numbers, Credit cards, Bank accounts (IBAN), US SSN, API keys, URLs, EMŠO (personal ID), Tax number (davčna), OIB (HR personal ID), AT SVN (insurance no.), ZZZS (health insurance no.), Birth dates, Places / locations, IP addresses. When the gateway supports more types than this version of the node knows, they appear in the list too, with the gateway's name for them and the type code in the description (in October 2026: "Codice fiscale (IT)", `IT_FISCAL_CODE`, and "Social handles", `SOCIAL_HANDLE`); the list is signed by the gateway and checked by the node before it is used. If it cannot be loaded or checked, the built-in list is used. Selecting every built-in type is the same as All Types: types the gateway adds are then detected too, whether or not they are ticked. Any other selection detects exactly the ticked types, so a type the gateway adds later is not detected until you tick it. |
+| **Placeholder Style** | **Random** (default), **Numbers in Order**, **Type Only** or **Redacted**. See [Which placeholders to use](#which-placeholders-to-use). |
 
 Options:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| **Existing Placeholder Map** | empty | Continue an earlier map. Values it already holds keep their placeholders (and are replaced wherever they appear, even if the gateway would not have detected them or they are listed in Ignore Terms), new placeholders never collide with it, and Sequential numbering carries on. Accepts every [map format](#accepted-map-formats), including an ID file from the browser extension. |
-| **Ignore Terms** | empty | Terms that are never treated as personal data, such as your company or product names, separated by commas or new lines (a term that itself contains a comma, such as "Acme, Inc.", can be given in an array set by expression, for example `{{ ["Acme, Inc.", "Orion"] }}`). A detection is dropped when its whole text equals a term, ignoring case ("Acme" drops a detected "ACME", not "Acme Cloud"). The terms never leave n8n; the text is still sent whole. Values in the Existing Placeholder Map are replaced anyway: the map wins. |
-| **Share Map Across Items** | off | One running map for all items of the execution, so the same person gets the same placeholder in every item. Each item outputs the map as it stands after that item. A placeholder that stands for different values in two items' existing maps stops the item with an error. |
-| **Include ID File** | off | Adds an `idFile` field the browser extension can open with **Load IDs**. To save it, use **Convert to File → Convert to Text File** with **Text Input Field** set to `idFile` (Convert to JSON would wrap it in the item, and the extension refuses that file). Random and Sequential styles only. Not added when the map is empty (nothing was detected and no Existing Placeholder Map was given). |
-| **Include Input Fields** | off | Copies the input item's fields into the output item. |
+| **Additionally Protect** | none | More to protect besides what the gateway finds, worked out inside n8n; the choices are never sent. **All Numbers** covers every number left in the text, including numbers inside codes such as K101, INV-2024-118 or 15.5.2026 (each as one `[NUMBER_…]`); a side effect is that in `info@acme2.si` the part `acme2.si` is protected too. **All Currency Values** covers amounts with a currency before or after them, such as 4.800,00 EUR, €4.800 or CHF 300 (`[AMOUNT_…]`). **Company Names (With Legal Suffixes Only)** covers names that end in a legal form such as d.o.o., d.d., GmbH or Ltd (`[COMPANY_…]`). Set by expression, it takes a list or comma-separated text of `NUMBER`, `AMOUNT` and `COMPANY` in any case; any other value stops the item before anything is sent. |
+| **Existing Placeholder Map** | empty | Continue an earlier map. Values it already holds keep their placeholders (and are replaced wherever they appear, even if the gateway would not have detected them or they are listed in Ignore Terms), new placeholders never collide with it, and Numbers in Order carries on counting. Accepts every [map format](#accepted-map-formats), including an ID file from the browser extension (version 1 or 2). To continue a Protect node's map with nothing lost, pass its ID file or the whole item (`{{ $('Protect').item.json }}`) rather than `placeholderMap` alone: the flat map holds only the value each group of IDs reveals to, so the other values of a group (from an extension ID file) are not protected again. |
+| **Ignore Terms** | empty | Terms that are never treated as personal data, such as your company or product names, separated by commas or new lines (a term that itself contains a comma, such as "Acme, Inc.", can be given in an array set by expression, for example `{{ ["Acme, Inc.", "Orion"] }}`). A detection is dropped when its whole text equals a term, ignoring case ("Acme" drops a detected "ACME", not "Acme Cloud"); the same goes for company names, Additionally Protect matches and possible IDs. The terms never leave n8n; the text is still sent whole. Values in the Existing Placeholder Map are replaced anyway: the map wins. |
+| **Share Map Across Items** | off | One running map for all items of the execution, so the same person gets the same placeholder in every item. Each item outputs the map as it stands after that item. A placeholder that stands for different values in two items' existing maps stops the item with an error. The same value under different placeholders in two items' maps is accepted: the first placeholder keeps protecting it, and the other still reveals it. |
+| **Include ID File** | off | Adds an `idFile` field (ID file version 2: values, placeholders, types and groups) the browser extension can open with **Load IDs**. To save it, use **Convert to File → Convert to Text File** with **Text Input Field** set to `idFile` (Convert to JSON would wrap it in the item, and the extension refuses that file). Added only for Random and Numbers in Order, and only when there are IDs (something was found or an Existing Placeholder Map was given); Type Only and Redacted add no file. The file holds the real values, so it needs Include Placeholder Map on. |
+| **Include Input Fields** | off | Copies the input item's fields into the output item, except `idFile`, `possibleIds`, `possibleIdsTruncated` and `entityFilterIgnored`: Protect writes these itself when they apply, and copied ones would describe another text. |
 | **Include Placeholder Map** | on | Turn it off when the output goes back to an LLM, for example when an AI agent calls Protect as a tool: the map holds the real values, and returning it would hand them to the model. Without the map the protected text **cannot be revealed later**. When off, the output has no `placeholderMap` and no `idFile` (also not copied from the input by Include Input Fields), and turning on Include ID File as well stops the item with an error before anything is sent. |
+| **Include Possible IDs** | off | Adds `possibleIds`: text left in clear that you may want to check, such as "Luki" next to the ID "Luka Zupan", "Mr. Zupan", or "Modra Vila" without its d.o.o. They are worked out inside n8n from the IDs in the map, plus what the gateway flags for review when it offers that (as of October 2026 it offers nothing to review). Possible IDs are a prompt to look, not a score: they are never replaced, there are no confidence numbers, and text that is not listed can still hold personal data. Limits: only names of 4 letters or more are matched in other case forms ("Ana" / "Ano" is not), a vowel that drops out ("Peter" / "Petra") is not recognised, an ordinary word can be flagged now and then ("Luke" next to "Luka"), and at most 50 are listed. |
 
 Output, one item per input item:
 
 ```json
 {
-  "protectedText": "Hello, my name is [PERSON_6kltt] and my email is [EMAIL_ADDRESS_r01q2].",
+  "protectedText": "Hello, my name is [PERSON_6kltt] and my email is [EMAIL_r01q2].",
   "placeholderMap": {
     "PERSON_6kltt": "Janez Novak",
     "PERSON_6kltt_NAME": "Janez",
     "PERSON_6kltt_SURNAME": "Novak",
-    "EMAIL_ADDRESS_r01q2": "ana.kovac@example.com"
+    "EMAIL_r01q2": "ana.kovac@example.com"
   },
   "entities": [
     { "entityType": "PERSON", "placeholder": "[PERSON_6kltt]", "start": 18, "end": 32, "score": 0.85 },
-    { "entityType": "EMAIL_ADDRESS", "placeholder": "[EMAIL_ADDRESS_r01q2]", "start": 49, "end": 70, "score": 1 }
+    { "entityType": "EMAIL_ADDRESS", "placeholder": "[EMAIL_r01q2]", "start": 49, "end": 62, "score": 1 }
   ]
 }
 ```
@@ -97,9 +100,20 @@ Output, one item per input item:
 | --- | --- |
 | `protectedText` | The text with placeholders. |
 | `placeholderMap` | The complete map needed to reveal this text: the existing map plus the new placeholders. Person names also get `_NAME` and `_SURNAME` entries, so an answer that mentions only "Janez" is revealed too. Retired placeholders from the existing map are kept with an empty value, so they stay retired when you pass the map back in. Empty (`{}`) for Type Only and Redacted. Left out when Include Placeholder Map is off. **It holds the real values.** |
-| `entities` | What was replaced, with `start`/`end` offsets into `protectedText`. |
+| `entities` | What was replaced: `entityType` (the type, such as `EMAIL_ADDRESS`, even where the placeholder is shorter), `placeholder`, `start`/`end` offsets into `protectedText`, and `score`. Never the real value. |
 | `entityFilterIgnored` | Present (`true`) only when the gateway refused the selected types and the node detected all types instead. |
-| `idFile` | Present only with Include ID File, and only when `placeholderMap` has at least one value. |
+| `idFile` | Present only with Include ID File, for Random and Numbers in Order, and only when there is at least one ID. |
+| `possibleIds` | Present only with Include Possible IDs: `start`, `end` (offsets into `protectedText`), `value`, `kind` (`company-name`, `surname`, `title-surname`, `case-form`, or `detected` for what the gateway flagged) and `type` (the kind of ID it may be, or `null`). The values are text that is still in clear in `protectedText`. |
+| `possibleIdsTruncated` | Present (`true`) only when there were more than 50 possible IDs and the list was cut. |
+
+Placeholders use the browser extension's prefixes: `[PERSON_…]`, `[EMAIL_…]`, `[PHONE_…]`, `[IBAN_…]`,
+`[COMPANY_…]`, and the type code for the rest (`[EMSO_…]`). A name the gateway finds followed by a
+legal form (d.o.o., d.d., s.p., GmbH, AG, Ltd, Inc., LLC and similar) is protected as one
+`[COMPANY_…]`, and the same name without the legal form elsewhere in the text becomes a company ID of
+its own. Placeholders already in the text, your own or another tool's (`[PERSON_1]`,
+`[PERSON_a7k2q]`), are left as they are, and a new placeholder never repeats one the text already
+contains. Maps with the longer keys earlier versions of the node made (`EMAIL_ADDRESS_r01q2`) still
+reveal and can still be continued.
 
 ### Detect
 
@@ -111,14 +125,15 @@ does.
 | Parameter | Notes |
 | --- | --- |
 | **Text** | The text to check. |
-| **Detect** / **Entity Types** | As in Protect. |
+| **Detect** / **Entity Type Names or IDs** | As in Protect. |
 
 Options:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| **Ignore Terms** | empty | As in Protect: detections equal to a term are not reported. |
-| **Include Input Fields** | off | Copies the input item's fields into the output item. |
+| **Ignore Terms** | empty | As in Protect: detections and possible IDs equal to a term are not reported. |
+| **Include Input Fields** | off | Copies the input item's fields into the output item, except `possibleIds`, `possibleIdsTruncated` and `entityFilterIgnored`: Detect writes `possibleIds` and `entityFilterIgnored` itself when they apply, and copied ones would describe another text. |
+| **Include Possible IDs** | off | Adds `possibleIds`: text the gateway flags for review without counting it as personal data (for example an organisation name), when the gateway offers that (as of October 2026 it offers nothing to review, so the list stays empty). A prompt to look, not a score: they are not in `entities`, `entityCount` or `countsByType`, and text that is not listed can still hold personal data. |
 | **Include Values** | off | Adds the matched text to each entity as `value`. These are the personal data themselves: leave this off when the output goes to an LLM, an AI agent or a log. |
 
 Output:
@@ -139,11 +154,14 @@ Output:
 | --- | --- |
 | `hasPersonalData` | `true` when at least one entity was found. |
 | `entityCount` / `countsByType` | How many entities were found, in total and per type. |
-| `entities` | `start` and `end` are offsets into the **original** text, in JavaScript string units (UTF-16), so `text.slice(start, end)` is the value. Overlapping detections are resolved the way Protect resolves them. |
+| `entities` | `start` and `end` are offsets into the **original** text, in JavaScript string units (UTF-16), so `text.slice(start, end)` is the value. Leading and trailing spaces are trimmed off, and a detection of only spaces is dropped. Of overlapping detections, the one starting first (the longest, at the same start) is kept. A name the gateway finds followed by a legal form ("Modra d.o.o.") is reported as one `COMPANY`, legal form included, as Protect replaces it, and so is the same detected name elsewhere in the text; this happens before Ignore Terms, so an ignored "Modra" does not hide "Modra d.o.o.". A detection whose type the gateway sent malformed is reported as `PII`. |
 | `entityFilterIgnored` | As in Protect. |
+| `possibleIds` | Present only with Include Possible IDs: `entityType`, `start`, `end` (offsets into the original text), and `value` only with Include Values. |
 
-Detect reports what the gateway found, nothing else: there is no placeholder map, so it does not
-know about values that only an Existing Placeholder Map would have matched.
+Detect reports what the gateway found, with company names typed as Protect types them, nothing
+else: there is no placeholder map and no Additionally Protect, so it does not know about values that
+only an Existing Placeholder Map or those rules would have matched, and its counts can differ from
+what Protect replaces.
 
 ### Reveal
 
@@ -182,7 +200,7 @@ user portal. Paste the key into the credential's **API Key** field.
 | API Key | Yes | Stored as a password field and sent as a bearer token. Only Protect and Detect use it. |
 
 There is no base URL field: the node always talks to `https://anon.prosecco37.com`, because it only
-trusts encryption keys signed by the Anonymizator trust root.
+trusts encryption keys signed through a chain from the Anonymizator root keys built into the node.
 
 The credential test calls `GET https://anon.prosecco37.com/v1/keyconfig`, so a problem shows up when
 you save the credential rather than on the first run:
@@ -193,13 +211,13 @@ you save the credential rather than on the first run:
 
 ## Compatibility
 
-- Tested end to end on n8n 2.41.7 (self-hosted, Docker), the only version tested so far. The node
+- Tested end to end on n8n 2.44.5 (self-hosted, Docker). The node
   uses the community-node API version 1 and Node.js's built-in `crypto`. It also relies on features
   of recent n8n releases (themed icons, `NodeConnectionTypes`, tool usage), so old 1.x releases are
   not expected to work; a minimum version has not been established.
 - No runtime dependencies.
-- The n8n host must reach `https://anon.prosecco37.com` over HTTPS and have a correct clock: requests
-  carry a timestamp and the gateway refuses stale ones.
+- The n8n host must reach `https://anon.prosecco37.com` over HTTPS, and its clock must be right to
+  within a minute: requests carry a timestamp and the gateway refuses stale ones.
 - Usable as an AI Agent tool (`usableAsTool`). n8n 2.x generates the tool variant automatically; no
   environment variable is needed (old n8n 1.x releases needed
   `N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true`). Read [As an AI Agent tool](#as-an-ai-agent-tool)
@@ -245,8 +263,8 @@ The node can be attached to an AI Agent as a tool. Everything a tool returns goe
 model's context, so:
 
 - **Protect as a tool:** turn **Include Placeholder Map** off, or use the **Type Only** or
-  **Redacted** style, which keep no map. With the map on, the real values would be returned to the
-  model, which defeats the purpose. Without the map, the model's answer cannot be revealed later.
+  **Redacted** style, whose map is empty and which add no ID file. With the map on, the real values
+  would be returned to the model, which defeats the purpose. Without the map, the model's answer cannot be revealed later.
 - **Detect as a tool:** leave **Include Values** off; the counts and types are enough for the model
   to decide.
 - **Keep the real text out of the tool's input and output:** leave **Include Input Fields** off
@@ -268,9 +286,13 @@ pass it back in as **Existing Placeholder Map** next time.
 
 ### Size and speed
 
-One gateway request per item. Keep each text under about 100,000 characters (that size takes around
-5 seconds); much larger texts can fail on the gateway. Split long documents into several items.
-Detection quality depends on the gateway's models. NER is statistical: it can miss a name or tag
+One gateway request per item. Up to 120,000 characters per item (or the limit the gateway's signed
+capabilities state); a longer text stops the item with "The text is too long", naming the limit,
+before the text is encrypted or sent (if the gateway itself refuses a text as too long, the message
+names no limit). 100,000 characters took about 5 seconds when measured. Split long documents
+into several items. The gateway also limits how many requests an account can make per minute; when
+it refuses, the item stops with "Too many requests" (enable **Retry On Fail** with a wait between
+tries). Detection quality depends on the gateway's models. NER is statistical: it can miss a name or tag
 only part of one, especially in unusual sentence structures, so always review protected text before
 relying on it for anything sensitive. Values already in an Existing Placeholder Map are always
 replaced, whether or not the gateway detects them.
@@ -283,23 +305,30 @@ whether the output can still be linked back to a person, and who holds the key.
 | Style | Example | Can you tell people apart? | Reveal | What it is |
 | --- | --- | --- | --- | --- |
 | Random | `[PERSON_a7k2q]` | Yes | Yes, with the placeholder map | Pseudonymisation (GDPR Art. 4(5)) |
-| Sequential | `[PERSON_1]` | Yes, and it shows the order values were found | Yes | Pseudonymisation |
-| Type Only | `[PERSON]`, `[PHONE_NUMBER]` | No, only what kind of value was there | No, nothing is kept | Masking |
-| Redacted | `[REDACTED]` | No | No, nothing is kept | Masking / redaction |
+| Numbers in Order | `[PERSON_1]` | Yes, and it shows the order values were found | Yes | Pseudonymisation |
+| Type Only | `[PERSON]`, `[PHONE]` | No, only what kind of value was there | No | Masking (typed generic) |
+| Redacted | `[REDACTED]` | No | No | Masking / redaction |
 
-- **Random and Sequential** give the same person the same placeholder, so the LLM can still follow
-  who did what, and Reveal puts the values back. The text stays **personal data**: the placeholder
-  map is the re-identification key. Keep maps private and away from the LLM provider. Random is the
-  default because maps from separate runs do not collide the way `[PERSON_1]` would.
-- **Type Only and Redacted** remove linkability: no map is produced, so there is nothing to reveal.
-  Data minimisation (Art. 5(1)(c)) and privacy by design (Art. 25) favour them when the task does
-  not need to know who is who, such as classification, summarising or sentiment.
+- **Random and Numbers in Order** give the same person the same placeholder, so the LLM can still
+  follow who did what, and Reveal puts the values back. The text stays **personal data**: the
+  placeholder map and ID files are the re-identification key. Keep them private and away from the
+  LLM provider. For a recipient with no realistic means to re-identify, such as the LLM provider, it
+  may not be personal data (CJEU, *EDPS v SRB*, 2025). For you, the key holder, it still is. Random
+  is the default because maps from separate runs do not collide the way `[PERSON_1]` would.
+- **Type Only and Redacted** remove linkability from the text: the model cannot tell the values
+  apart, so the protected text cannot be revealed and the placeholder map is empty (`{}`). Include
+  ID File adds no file for them. Data minimisation
+  (Art. 5(1)(c)) and privacy by design (Art. 25) favour them when the task does not need to know who
+  is who, such as classification, summarising or sentiment; the model's answers may be worse because
+  it cannot tell who is who. Values from an Existing Placeholder Map are masked too (as their type,
+  such as `[COMPANY]`, or `[CUSTOM]`).
 - **Type Only** is usually the better non-linkable choice: "[PERSON] approved the invoice" reads far
-  better, to a model and to people, than "[REDACTED] approved the invoice".
+  better, to a model and to people, than "[REDACTED] approved the invoice", and revealing that
+  something was a person is a negligible risk.
 - **Redacted** leaks almost nothing, not even the kind of value. Use it for the most sensitive text
   and for anything published.
-- **No style makes text anonymous.** The node replaces what the gateway detects and what your
-  existing map holds. Job titles, dates, places, rare events and writing style can still identify
+- **No style makes text anonymous.** The node replaces what the gateway detects, what Additionally
+  Protect finds and what your existing map holds. Job titles, dates, places, rare events and writing style can still identify
   people, so do not call the output anonymised.
 - **Document the choice per data flow.** ISO/IEC 27701 expects you to state which de-identification
   technique applies to which flow; ISO/IEC 27002:2022 control 8.11 (data masking) and ISO/IEC 20889
@@ -317,8 +346,8 @@ JSON object or as JSON text:
 | Object with bare keys (what Protect outputs) | `{"PERSON_a7k2q": "Janez Novak"}` |
 | Object with bracketed keys | `{"[PERSON_a7k2q]": "Janez Novak"}` |
 | List of pairs | `[{"placeholder": "[PERSON_a7k2q]", "value": "Janez Novak"}]` |
-| A whole Protect output item | `{{ $('Protect').item.json }}` |
-| An Anonymizator browser extension ID file | `{"format": "anonymizator-id-file", "version": 1, ...}` |
+| A whole Protect output item: its `idFile` when it has a current one (lossless: groups and types kept), else its `placeholderMap` | `{{ $('Protect').item.json }}` |
+| An Anonymizator browser extension ID file, version 2 or 1 | `{"format": "anonymizator-id-file", "version": 2, ...}` |
 
 Placeholders start with a capital letter and contain only letters, digits and underscores. An entry
 with an empty value is treated as retired: its placeholder is never reused, and it is never
@@ -329,14 +358,16 @@ revealed. Error messages name the offending placeholder or entry number but neve
 The node uses the same placeholders and the same ID file format as the Anonymizator Chrome
 extension:
 
-- **From n8n to the browser:** turn on **Include ID File**, then add **Convert to File → Convert to
+- **From n8n to the browser:** turn on **Include ID File** (Random or Numbers in Order), then add **Convert to File → Convert to
   Text File** with **Text Input Field** set to `idFile`, and open the file in the extension with
-  **Load IDs**. The extension then reveals answers you paste into it. (Convert to JSON writes the
-  whole item, with `idFile` nested inside it, and the extension refuses that file.)
-- **From the browser to n8n:** pass an ID file saved with **Save IDs** (read it with **Extract from
+  **Load IDs**. The extension then reveals answers you paste into it. Load IDs opens a file into an
+  empty Current IDs only; files are never merged, so use **Clear all** there first. (Convert to JSON
+  writes the whole item, with `idFile` nested inside it, and the extension refuses that file.)
+- **From the browser to n8n:** pass an ID file saved with **Export IDs** (read it with **Extract from
   File**, or paste its contents) as Reveal's Placeholder Map or Protect's Existing Placeholder Map.
-  The node's Placeholder Style setting is used for new placeholders, not the style recorded in the
-  file.
+  Files from older versions of the extension (version 1) are read too. The node's Placeholder Style
+  setting is used for new placeholders, not the style recorded in the file. IDs grouped as one in
+  the extension reveal to the value chosen there.
 
 ID files hold the real values. Keep them as private as the data itself.
 
@@ -348,9 +379,10 @@ any other endpoint.
 
 | Sent to the gateway | When | Notes |
 | --- | --- | --- |
-| `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process, plus once more when the gateway rotates its key and one retry after a server error (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed public key, checked against the pinned trust root before anything else is sent. |
-| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text; at most a few times when the gateway asks for a retry (a 5xx answer, a key rotation, or a refused entity filter) | The body is HPKE-encrypted (RFC 9180) to the verified key. |
-| Inside the encrypted body | | The **Text** parameter, with each half of an emoji (UTF-16 surrogate) replaced by a space so that positions line up, and, with Selected Types, the list of entity types. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
+| `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process (sooner when the cached copy no longer checks out), plus once more when the gateway rotates its key, one retry after a server error, and one more two seconds later when the gateway is part-way through renewing its signing key (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed key configuration, checked through a signed chain from the root keys built into the node before anything else is sent. |
+| `GET /v1/capabilities` with your API key as `Authorization: Bearer ...` | When Protect or Detect runs with non-blank text, and when the editor loads the **Entity Type Names or IDs** list once a credential is selected (without one the built-in list is shown and nothing is sent); at most once every 5 minutes per n8n process, and after a failed attempt not again for 5 minutes (a rejected API key or a missing credential does not count as an attempt, so it does not hold back other credentials) | No body. The answer is the gateway's signed list of supported entity types, their names and groups, the text limit and the review-only types, checked through the same chain. It can only add types to the node's built-in list; if it cannot be loaded or checked, the built-in list and limit are used and nothing else changes. |
+| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text within the character limit; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key. |
+| Inside the encrypted body | | The **Text** parameter exactly as given; with Selected Types (unless every built-in type is selected), exactly the selected entity types; with **Include Possible IDs**, and only when the gateway's capabilities list review-only types, the flag `"possible": true`. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
 | In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key. |
 | In the clear, as HTTP headers | | `Content-Type`, `Accept`, `Authorization`, and the standard headers n8n's HTTP helper adds. |
 
@@ -358,12 +390,16 @@ Never sent anywhere:
 
 - the placeholders and the placeholder map, including the **Existing Placeholder Map** you pass in;
 - **Ignore Terms** (they are applied after detection, inside n8n);
+- **Additionally Protect** and what it finds, and the possible IDs worked out from your IDs (both
+  inside n8n);
 - ID files;
 - anything **Reveal** reads or writes: Reveal makes no network request and needs no credential;
-- the other fields of the input item, and blank text.
+- the other fields of the input item, blank text, and text over the character limit (refused before
+  it is encrypted).
 
-The gateway answers with entity types, positions and scores, encrypted with a key only this request
-can derive. It returns no text, no placeholders and no map. The gateway is operated by Prosecco 37,
+The gateway answers with entity types, positions and scores (and, when asked, the types and
+positions of review-only spans), encrypted with a key only this request can derive. It returns no
+text, no placeholders and no map. The gateway is operated by Prosecco 37,
 which states that it is stateless and keeps nothing. The node cannot verify what happens on the
 server; what it can guarantee is the list above.
 
@@ -371,10 +407,12 @@ server; what it can guarantee is the list above.
 
 - **What leaves n8n:** only the text of Protect and Detect, encrypted with HPKE (RFC 9180) to the
   gateway's current key; see [What leaves n8n](#what-leaves-n8n) for the details. Network
-  intermediaries, including the CDN in front of the gateway, see ciphertext. Before
-  sending, the node checks that the gateway's key is signed by the pinned Anonymizator trust root;
-  if it is not, nothing is sent and the item stops with an explanation (this can mean a
-  TLS-inspecting proxy is intercepting the connection).
+  intermediaries, including the CDN in front of the gateway, see ciphertext; they still see the
+  API key, the timing and the approximate size of each request and answer (bodies are padded to
+  coarse size classes). Before sending, the node checks the gateway's key through a signed chain
+  from the Anonymizator root keys built into the node (a primary and a backup); if the check fails,
+  nothing is sent and the item stops with an explanation (this can mean a TLS-inspecting proxy is
+  intercepting the connection).
 - **What the gateway returns:** positions and types of what it found. It never sees placeholders or
   maps and keeps nothing.
 - **Where the map lives:** Protect creates the placeholder map inside n8n and outputs it, so the map
@@ -438,6 +476,10 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
+- **0.2.0** (2026-10-22): brought in line with the Anonymizator browser extension 2026.10.19.1: the
+  gateway's protocol version 2, the entity type list from the gateway's signed capabilities, the
+  extension's placeholder prefixes and company names, **Additionally Protect** and **Include
+  Possible IDs** options, ID file version 2, the extension's error wording.
 - **0.1.1** (2026-10-06): **Detect** operation; **Include Placeholder Map** and **Ignore Terms** options;
   an importable example workflow; documentation of exactly what leaves n8n.
 - **0.1.0** (2026-10-05): first release. Protect and Reveal, four placeholder styles, map

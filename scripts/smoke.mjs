@@ -212,6 +212,83 @@ function show(out) {
 let randomRun;
 let idFileRun;
 
+await scenario('Keyconfig v2 verifies against the pinned roots', async () => {
+	const kc = await gateway.acquireKeyconfig(makeContext({}), { force: true });
+	console.log(
+		`key_id ${kc.keyId}, delegation serial ${kc.serial}, issued_at ${kc.issuedAt}, key not_after ${kc.notAfter}`,
+	);
+	assert.ok(Number.isInteger(kc.keyId) && kc.keyId >= 1);
+	assert.equal(kc.publicKey.length, 32);
+	assert.equal(gateway.delegationFloor(), kc.serial, 'the serial floor was raised');
+});
+
+await scenario('Capabilities v1 verify (signed by the same delegation)', async () => {
+	const caps = await gateway.fetchCapabilities(makeContext({}));
+	assert.ok(caps, 'a verified capabilities document');
+	console.log(
+		redact({
+			serverVersion: caps.serverVersion,
+			issuedAt: caps.issuedAt,
+			languages: caps.languages,
+			features: caps.features,
+			maxTextChars: caps.maxTextChars,
+			effectiveMaxTextChars: gateway.effectiveMaxTextChars(caps),
+			entities: caps.entities.map((e) => `${e.type}:${e.default}`),
+			possible: caps.possible.map((p) => p.type),
+		}),
+	);
+	assert.ok(caps.entities.some((e) => e.type === 'PERSON'));
+	assert.ok(caps.labels.get('type:PERSON').has('en'));
+});
+
+await scenario('Analyze directly: spans (and possible spans when asked)', async () => {
+	const text = 'my name is Janez Novak, janez.novak@example.com';
+	const result = await gateway.analyze(makeContext({}), text, undefined, { possible: true });
+	const found = result.spans.map((s) => [s.entity_type, text.slice(s.start, s.end)]);
+	console.log(
+		redact({
+			spans: found,
+			possible: result.possible,
+			entityFilterIgnored: result.entityFilterIgnored,
+		}),
+	);
+	assert.ok(found.some(([type, value]) => type === 'PERSON' && value === 'Janez Novak'));
+	assert.ok(
+		found.some(([type, value]) => type === 'EMAIL_ADDRESS' && value === 'janez.novak@example.com'),
+	);
+	assert.ok(Array.isArray(result.possible));
+});
+
+await scenario('Text over the local cap is refused before anything is sent', async () => {
+	const before = requestCount;
+	let caught;
+	try {
+		await gateway.analyze(makeContext({}), 'a'.repeat(120001));
+	} catch (error) {
+		caught = error;
+	}
+	assert.equal(caught?.code, 'payload_too_large');
+	assert.equal(requestCount, before);
+});
+
+await scenario('Protect over the capabilities text cap: refused in n8n, nothing sent', async () => {
+	const cap = gateway.effectiveMaxTextChars(await gateway.fetchCapabilities(makeContext({})));
+	const before = requestCount;
+	let caught;
+	try {
+		await execute(protect('a '.repeat(Math.ceil((cap + 1) / 2))));
+	} catch (error) {
+		caught = error;
+	}
+	console.log(
+		`cap ${cap}: ${caught?.constructor.name}: ${caught?.message} / ${caught?.description}`,
+	);
+	assert.ok(caught instanceof NodeOperationError);
+	assert.equal(caught.message, 'The text is too long');
+	assert.ok(caught.description.includes(cap.toLocaleString('en-US')));
+	assert.equal(requestCount, before, 'no request (capabilities are cached)');
+});
+
 await scenario('Protect, all types, random placeholders', async () => {
 	const [out] = await execute(protect(TEXT));
 	show(out);
@@ -219,7 +296,12 @@ await scenario('Protect, all types, random placeholders', async () => {
 	assert.ok(!out.protectedText.includes(PERSON), 'name replaced');
 	assert.ok(!out.protectedText.includes(EMAIL), 'email replaced');
 	assert.match(out.protectedText, /\[PERSON_[a-z0-9]{5}\]/);
-	assert.match(out.protectedText, /\[EMAIL_ADDRESS_[a-z0-9]{5}\]/);
+	// Placeholders use the extension's prefixes: EMAIL_ADDRESS -> [EMAIL_...].
+	assert.match(out.protectedText, /\[EMAIL_[a-z0-9]{5}\]/);
+	assert.ok(out.entities.some((e) => e.entityType === 'EMAIL_ADDRESS'));
+	for (const entity of out.entities) {
+		assert.deepEqual(Object.keys(entity), ['entityType', 'placeholder', 'start', 'end', 'score']);
+	}
 	assert.ok(Object.values(out.placeholderMap).includes(PERSON));
 	assert.ok(Object.values(out.placeholderMap).includes(EMAIL));
 	assert.ok(Object.values(out.placeholderMap).includes('Janez'), 'PERSON _NAME sub-key');
@@ -271,7 +353,7 @@ await scenario('Protect, sequential, continuing an existing map', async () => {
 	assert.ok(out.protectedText.startsWith('[PERSON_1] forwarded'), 'known value reuses [PERSON_1]');
 	assert.ok(out.protectedText.includes('[PERSON_3]'), 'new person continues after the tombstone');
 	assert.ok(!out.protectedText.includes('[PERSON_2]'), 'tombstoned key never reused');
-	assert.match(out.protectedText, /\[EMAIL_ADDRESS_2\]/);
+	assert.match(out.protectedText, /\[EMAIL_1\]/, 'a new email gets the EMAIL prefix');
 	assert.equal(out.placeholderMap.PERSON_1, PERSON);
 	assert.equal(out.placeholderMap.EMAIL_ADDRESS_1, EMAIL, 'map keeps existing entries');
 	// The gateway decides the exact range: in this sentence it currently tags only "Kovač".
@@ -285,7 +367,7 @@ await scenario('Protect, type-only masking', async () => {
 	const [out] = await execute(protect(TEXT, { placeholderStyle: 'typed' }));
 	show(out);
 	assert.ok(out.protectedText.includes('[PERSON]'));
-	assert.ok(out.protectedText.includes('[EMAIL_ADDRESS]'));
+	assert.ok(out.protectedText.includes('[EMAIL]'));
 	assert.ok(!out.protectedText.includes(PERSON) && !out.protectedText.includes(EMAIL));
 	assert.deepEqual(out.placeholderMap, {});
 	assertOffsets(out);
@@ -338,7 +420,8 @@ await scenario('Protect with Include ID File, emoji before the name', async () =
 	assert.ok(!out.protectedText.includes(PERSON) && !out.protectedText.includes(EMAIL));
 	assert.ok(out.protectedText.startsWith('😀😀 [PERSON_'), 'emoji kept, offsets in UTF-16');
 	assert.equal(out.idFile.format, 'anonymizator-id-file');
-	assert.equal(out.idFile.version, 1);
+	assert.equal(out.idFile.version, 2);
+	assert.ok(out.idFile.ids.every((entry) => typeof entry.type === 'string'));
 	assert.equal(out.idFile.numbering, 'random');
 	assertOffsets(out);
 });
@@ -429,8 +512,87 @@ await scenario('Include Placeholder Map off: no map in the output', async () => 
 	assertOffsets(out);
 });
 
+await scenario('Entity Types list: bundled rows plus verified server types', async () => {
+	const options = await new Anonymizator().methods.loadOptions.getEntityTypes.call(makeContext({}));
+	console.log(redact(options.map((o) => `${o.value}: ${o.name}`)));
+	for (const id of ['PERSON', 'EMAIL_ADDRESS', 'IBAN', 'EMSO', 'IP_ADDRESS']) {
+		assert.ok(
+			options.some((o) => o.value === id),
+			id,
+		);
+	}
+	assert.equal(options.find((o) => o.value === 'PERSON').name, 'Names');
+});
+
+await scenario('Protect, selected server-only type from the capabilities', async () => {
+	const caps = await gateway.fetchCapabilities(makeContext({}));
+	const serverOnly = caps.entities
+		.map((e) => e.type)
+		.filter((t) => !['PERSON', 'EMAIL_ADDRESS', 'IBAN', 'IBAN_CODE'].includes(t));
+	const [out] = await execute(
+		protect(TEXT, { detect: 'selected', entityTypes: ['EMAIL_ADDRESS', serverOnly[0]] }),
+	);
+	show({ selected: ['EMAIL_ADDRESS', serverOnly[0]], out });
+	assert.equal(out.entityFilterIgnored, undefined, 'the gateway accepted the filter');
+	assert.ok(out.protectedText.includes(PERSON), 'name kept');
+	assert.ok(!out.protectedText.includes(EMAIL), 'email replaced');
+});
+
+await scenario('Protect, Additionally Protect (numbers, currency values, companies)', async () => {
+	const text = `${PERSON} of Modra Vila d.o.o. paid 4.800,00 EUR for order K101.`;
+	const before = requestCount;
+	const [out] = await execute(
+		protect(text, {
+			placeholderStyle: 'sequential',
+			options: { additionallyProtect: ['NUMBER', 'AMOUNT', 'COMPANY'] },
+		}),
+	);
+	show(out);
+	assert.match(out.protectedText, /\[COMPANY_1\]/);
+	assert.match(out.protectedText, /\[AMOUNT_1\]/);
+	assert.match(out.protectedText, /\[NUMBER_1\]/);
+	assert.ok(!out.protectedText.includes('Modra Vila'));
+	assert.ok(!out.protectedText.includes('4.800'));
+	assert.ok(requestCount - before <= 2, 'one analyze request (plus a capabilities refresh)');
+	assertOffsets(out);
+	const [back] = await execute(reveal(out.protectedText, out.placeholderMap), { helpers: false });
+	assert.equal(back.revealedText, text);
+});
+
+await scenario('Protect and Detect with Include Possible IDs', async () => {
+	const caps = await gateway.fetchCapabilities(makeContext({}));
+	console.log(`capabilities list possible types: ${redact(caps.possible.map((p) => p.type))}`);
+	const text = `${PERSON} called. Later I wrote to Janezu at Modra Vila, from Modra Vila d.o.o.`;
+	const [out] = await execute(
+		protect(text, { options: { includePossibleIds: true, additionallyProtect: ['COMPANY'] } }),
+	);
+	show(out);
+	assert.ok(Array.isArray(out.possibleIds));
+	for (const p of out.possibleIds) {
+		assert.equal(out.protectedText.slice(p.start, p.end), p.value, `offsets of ${p.value}`);
+		assert.deepEqual(Object.keys(p), ['start', 'end', 'value', 'kind', 'type']);
+	}
+	// Server-side detection decides what is left in clear: production tagged "Janezu" as PERSON
+	// on 2026-10-21. Only when it is left in clear must it be listed as a case form.
+	if (!Object.values(out.placeholderMap).includes('Janezu')) {
+		assert.ok(
+			out.possibleIds.some((p) => p.value === 'Janezu' && p.kind === 'case-form'),
+			'case form of a protected name',
+		);
+	}
+	const [detected] = await execute({
+		operation: 'detect',
+		text,
+		detect: 'all',
+		options: { includePossibleIds: true, includeValues: true },
+	});
+	show(detected);
+	assert.ok(Array.isArray(detected.possibleIds));
+	for (const p of detected.possibleIds) assert.equal(text.slice(p.start, p.end), p.value);
+});
+
 await scenario('Bad API key: friendly rejected-key error, not success', async () => {
-	gateway.clearKeyconfigCache();
+	gateway.clearGatewayCaches();
 	let caught;
 	try {
 		await execute(protect(TEXT), { key: 'anon_not_a_real_key_0000000000' });

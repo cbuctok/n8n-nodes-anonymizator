@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const {
 	parseIgnoreTerms,
 	filterIgnoredSpans,
+	ignoredTermTest,
 } = require('../dist/nodes/Anonymizator/shared/ignoreTerms.js');
 
 const span = (text, value, type = 'PERSON') => {
@@ -69,5 +70,16 @@ describe('filterIgnoredSpans', () => {
 		const spans = [span(text, 'Janez Novak'), { entity_type: 'X', start: 5, end: 999 }];
 		assert.equal(filterIgnoredSpans(text, spans, new Set()), spans);
 		assert.deepEqual(filterIgnoredSpans(text, spans, parseIgnoreTerms('Janez Novak')), [spans[1]]);
+	});
+});
+
+describe('ignoredTermTest (the isSkipped test of Protect)', () => {
+	test('undefined without terms; whole trimmed values, NFC and case folded', () => {
+		assert.equal(ignoredTermTest(parseIgnoreTerms('')), undefined);
+		const isSkipped = ignoredTermTest(parseIgnoreTerms('Acme d.o.o., ana kovač'));
+		assert.equal(isSkipped('ACME D.O.O.'), true);
+		assert.equal(isSkipped('  Ana Kova\u0063\u030C '), true, 'decomposed č matches after NFC');
+		assert.equal(isSkipped('Acme'), false, 'only whole values');
+		assert.equal(isSkipped('Acme d.o.o. Ljubljana'), false);
 	});
 });

@@ -8,7 +8,12 @@ import type {
 import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 import { detectDescription, executeDetect } from './actions/detect';
-import { createProtectRunState, executeProtect, protectDescription } from './actions/protect';
+import {
+	createProtectRunState,
+	executeProtect,
+	loadEntityTypeOptions,
+	protectDescription,
+} from './actions/protect';
 import { executeReveal, revealDescription } from './actions/reveal';
 import { errorNode } from './shared/errors';
 
@@ -80,6 +85,13 @@ export class Anonymizator implements INodeType {
 			...detectDescription,
 			...revealDescription,
 		],
+	};
+
+	methods = {
+		loadOptions: {
+			// Entity Types: the bundled catalog plus what the gateway's verified capabilities add.
+			getEntityTypes: loadEntityTypeOptions,
+		},
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {

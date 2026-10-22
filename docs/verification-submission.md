@@ -8,20 +8,24 @@ is not part of the npm package (`files` lists only `dist` and `NOTICE`).
 | Field | Value |
 | --- | --- |
 | Package | `n8n-nodes-anonymizator` |
-| Version | `0.1.1`, **pending**: cut it with `npm run release` and approve the staged version on npmjs.com, so it carries a provenance attestation from GitHub Actions. Also the version installed in the video. |
+| Version | `0.2.0`, **pending**: merge the parity work into `dev`, cut it with `npm run release` and approve the staged version on npmjs.com, so it carries a provenance attestation from GitHub Actions. Also the version installed in the video. |
 | Repository | https://github.com/cbuctok/n8n-nodes-anonymizator |
 | Video | `<link>` |
 | Node API version | 1 |
 | Credential type | `anonymizatorApi` |
 | Reviewer API key | TODO(reviewer-key): how the reviewer gets a working key |
 
-**Do not submit `0.1.0`.** It was published by hand (npm only lets a trusted publisher be added to a
-package that already exists), so it has no provenance attestation. Every later version is staged by
-`publish.yml` from a tag.
+**Do not submit `0.1.0` or `0.1.1`.** `0.1.0` was published by hand (npm only lets a trusted publisher
+be added to a package that already exists), so it has no provenance attestation. Both speak only
+version 1 of the gateway's protocol, which the gateway stops accepting before 2027-02-16, so a
+reviewer installing them would test a node that is about to stop working. Every version from `0.1.1`
+on is staged by `publish.yml` from a tag.
 
 Before sending, check:
 
-- `npm view n8n-nodes-anonymizator@0.1.1 dist.attestations` is not empty;
+- `npm view n8n-nodes-anonymizator@0.2.0 dist.attestations` is not empty;
+- `npm run smoke` and `npm run n8n:reset && npm run e2e` passed on the tagged commit (they need the
+  API key and Docker, so CI cannot run them);
 - the README's Credentials section names where to get a key (TODO(api-key-portal));
 - the reviewer has a key (TODO(reviewer-key)).
 
@@ -37,9 +41,11 @@ Before sending, check:
 > `[PERSON_a7k2q]`; **Reveal** puts the real values back into the model's answer; **Detect** reports
 > what a text contains without changing it, for routing. Detection runs on the Anonymizator privacy
 > gateway operated by Prosecco 37: the text is HPKE-encrypted to the gateway, which answers with
-> positions only. The placeholders, the map and Reveal are computed inside n8n.
+> positions only. The placeholders, the map and Reveal are computed inside n8n, by the same engine as
+> the Anonymizator browser extension, so ID files move between the two. The list of entity types
+> comes from a document the gateway signs, so installs pick up new types without an update.
 >
-> The video installs version 0.1.1 from npm through **Settings → Community Nodes**, creates the
+> The video installs version 0.2.0 from npm through **Settings → Community Nodes**, creates the
 > credential and runs its test, then runs the example workflow from the repository (Protect, a Basic
 > LLM Chain, Reveal) and shows the round trip. Nothing is loaded from a local folder and nothing is
 > patched on the instance.
@@ -52,7 +58,7 @@ Before sending, check:
 ## How it differs from the built-in Guardrails node
 
 The verification guidelines ask that a node not duplicate an existing one. Guardrails' **Sanitize
-Text** overlaps in purpose, not in function (checked against `@n8n/n8n-nodes-langchain` 2.41.5):
+Text** overlaps in purpose, not in function (checked against `@n8n/n8n-nodes-langchain` 2.44.3, the version n8n 2.44.5 ships):
 
 - **Detection.** Guardrails' PII check is 36 regular expressions with no validation (no Luhn or
   mod-97 check), and none of its types is a person name; a name is caught only by a custom regex that
@@ -70,39 +76,53 @@ Text** overlaps in purpose, not in function (checked against `@n8n/n8n-nodes-lan
 
 ## Similar verified community nodes
 
-Each sentence is from reading the published package; none is a criticism.
+Each sentence is from reading the latest published package (checked 2026-10-22); none is a criticism.
 
-- **Privent** (`n8n-nodes-privent`): offers a local regex mode and cloud modes that by default send
+- **Privent** (`n8n-nodes-privent`): defaults to a local regex mode and offers cloud modes that by default send
   the text over TLS to its backend, where the API-key mode also keeps the values; Anonymizator always sends
   the text HPKE-encrypted to a gateway that returns positions only, and keeps the map on the n8n item
   where it can be continued, shared across items or exported as an ID file.
 - **Miravig** (`n8n-nodes-miravig`): detects entirely inside n8n with checksum-validated patterns and
-  masks detected personal data with fixed tokens (its Unmask restores user-supplied glossary terms);
-  Anonymizator sends text to a remote gateway for NER-based detection of names and locations and
-  pseudonymises the detected values reversibly.
+  heuristic name and address rules, and (with a licence) masks with one-way tokens, numbered for
+  names (its Unmask restores only user-supplied glossary terms); Anonymizator sends text to a remote
+  gateway for NER-based detection of names and locations and pseudonymises the detected values
+  reversibly.
 - **doccape** (`@scitlab/n8n-nodes-doccape`): its server performs the anonymisation and returns the
   result; Anonymizator's gateway returns positions only, and substitution, the map and the restore
   step run inside n8n.
 - **PromptLock Guard** (`n8n-nodes-promptlock-guard`): scores text for compliance and prompt-injection
   risk, routes it to four outputs and redacts server-side with type tags; Anonymizator does no risk
   scoring or injection screening and focuses on reversible pseudonymisation with a local Reveal.
+- **PII Guardrails** (`n8n-nodes-piiguardrails`): its server masks the text and returns the
+  placeholder map, and its Unmask sends the text and that map back to the server; Anonymizator's
+  gateway returns positions only, and substitution, the map and Reveal run inside n8n.
+- **SoterAI** (`n8n-nodes-soterai`): screens prompts and outputs for injection, jailbreaks, secrets
+  and PII and redacts one-way, with a local mode; Anonymizator does no threat screening and focuses
+  on reversible pseudonymisation with a local Reveal.
 
 ## Notes for the reviewer
 
 - **Scope**: no runtime dependencies. `dist/` requires only `n8n-workflow` and Node.js's built-in
-  `node:crypto`; `npm pack` yields 51 files (117 kB). No `eslint-disable` comments anywhere. The
-  scanner (`@n8n/scan-community-package` 0.38.0) runs in CI on the source and on the packed tarball.
+  `node:crypto`; `npm pack` yields 69 files (164 kB). No `eslint-disable` comments anywhere. The
+  scanner (`@n8n/scan-community-package` 0.40.0) runs in CI on the source and on the packed tarball.
 - **Transport**: every request goes through `helpers.httpRequestWithAuthentication`, so n8n's proxy
   settings and timeouts apply. There is no base URL field: the node only talks to
-  `https://anon.prosecco37.com`, because it only trusts keys signed by a pinned root.
+  `https://anon.prosecco37.com`, because it only trusts keys signed through a chain from the root
+  keys pinned in the node.
 - **Encryption, fail closed**: the text is sealed with HPKE (RFC 9180, X25519 / HKDF-SHA256 /
-  AES-256-GCM) to the gateway's current key and padded to fixed size buckets. The key configuration
-  must carry an Ed25519 signature by the pinned trust root; if it does not (for example behind a
-  TLS-inspecting proxy), nothing is sent and the item stops with an explanation. The implementation
-  is checked against the RFC 9180 test vector and an independent HPKE recipient in the unit tests.
-- **Ranges only, stateless gateway**: the gateway receives the encrypted text (and an optional
-  entity-type filter) and answers with entity types, positions and scores. It never sees placeholders
-  or the map. The README's "What leaves n8n" section lists every field sent.
+  AES-256-GCM, the gateway's protocol v2) to the gateway's current key, padded to fixed size
+  buckets, and freshly sealed for every attempt. The key configuration must verify through an
+  Ed25519 chain: one of two pinned roots (primary and backup) signs a delegation for this host
+  (at most 32 days), the delegated key signs the key list, and each key carries a signed expiry. If the
+  check fails (for example behind a TLS-inspecting proxy), nothing is sent and the item stops with
+  an explanation. The implementation is checked against the RFC 9180 test vector, every case of the
+  gateway's published protocol vectors, an independent HPKE recipient, and the browser extension's
+  own HPKE code in the unit tests.
+- **Ranges only, stateless gateway**: the gateway receives the encrypted text (plus an optional
+  entity-type filter, and a flag asking for review-only spans when the user opts in) and answers
+  with entity types, positions and scores. It never sees placeholders or the map. A signed
+  capabilities document from the gateway can add entity types to the node's list but never remove
+  any. The README's "What leaves n8n" section lists every request and field sent.
 - **Credential test**: `GET /v1/keyconfig` with redirects disabled. The gateway's front end answers
   a bad key with a 302 to its login page (or 401 when JSON is asked for), so the test maps 302 and
   401 to "API key rejected" and 403 to "no access to Anonymizator"; following the redirect would
@@ -115,7 +135,8 @@ Each sentence is from reading the published package; none is a criticism.
   carries a notice not to expose it as a tool where the agent's output leaves the user's control.
   The README has a safe recipe; the recommended layout is Protect before the agent and Reveal after.
 - **Cost**: one gateway request per item for Protect and Detect (plus a key fetch at most every ten
-  minutes); Reveal is free and offline. Items run one after another.
+  minutes and a capabilities fetch at most every five); Reveal is free and offline. Items run one
+  after another. Texts over 120,000 characters are refused before they are sent.
 - **Execution data**: n8n stores the original text and the map in execution data like any output;
   the Protect notice says so, and the example workflow does not save successful production runs.
 
@@ -124,17 +145,21 @@ Each sentence is from reading the published package; none is a criticism.
 Run on the commit to be tagged:
 
 - `npm run lint`, `npx tsc --noEmit -p .`, `node scripts/check-node-fields.mjs`: pass.
-- `npm test`: unit tests against `dist/`, including the RFC 9180 vector, a fake HPKE gateway for
-  every status path, and differential tests against the Anonymizator browser extension's engine.
-- `npm run scan`: `[PASS] source` and `[PASS] packed tarball`.
-- `npm run smoke`: the built node against the production gateway with synthetic data (Protect in
-  every style, Detect, Ignore Terms, Include Placeholder Map off, Reveal, a rejected key).
-- `npm run e2e`: a real n8n 2.41.7 in Docker runs a 19-node workflow covering every operation and
-  option, checks the credential test and the tool variant, and imports the example workflow.
+- `npm test`: unit tests against `dist/` (1009 on 2026-10-22, none skipped), including the RFC 9180 vector, the
+  gateway's protocol and capabilities vectors, a fake HPKE gateway for every status and retry path,
+  and differential and interop tests against the Anonymizator browser extension's own files.
+- `npm run scan` (`@n8n/scan-community-package` 0.40.0): `[PASS] source` and `[PASS] packed tarball`.
+- `npm run smoke`: the built node against the production gateway with synthetic data (24 scenarios:
+  key configuration and capabilities verification, the text limit, Protect in every style, Detect,
+  Ignore Terms, Include Placeholder Map off, Additionally Protect, Include Possible IDs, the entity
+  type list, Reveal, a rejected key).
+- `npm run e2e`: a real n8n 2.44.5 in Docker runs a 19-node workflow covering every operation and
+  option, checks the credential test, the entity type list and the tool variant, and imports the
+  example workflow.
 
 ## Video outline
 
-1. **Install**: Settings → Community Nodes → Install → `n8n-nodes-anonymizator` (version 0.1.1).
+1. **Install**: Settings → Community Nodes → Install → `n8n-nodes-anonymizator` (version 0.2.0).
    Show the node in the nodes panel (search "PII" or "anonymize").
 2. **Credential**: create an **Anonymizator API** credential, paste the key, save, and show the
    successful test. Optionally show a wrong key giving "API key rejected".
@@ -144,7 +169,12 @@ Run on the commit to be tagged:
    *Draft Reply* and show the model saw only placeholders; open *Reveal* and show `revealedText`
    with the real values and an empty `unresolvedPlaceholders`.
 5. **Detect**: add a Detect node on the same text and show `hasPersonalData` and `countsByType`.
-6. **Tool use (short)**: attach Anonymizator to an AI Agent as a tool with Include Placeholder Map
+   Switch Detect to *Selected Types* and open **Entity Type Names or IDs**: the list holds the
+   built-in types plus the ones the gateway's signed capabilities add (for example *Social handles*).
+6. **Additionally Protect (short)**: on Protect, tick *All Currency Values* and *Company Names (With
+   Legal Suffixes Only)* and show `[AMOUNT_…]` and `[COMPANY_…]` for "EUR 1,250.00" and
+   "Sonce d.o.o."; these are found inside n8n and never sent.
+7. **Tool use (short)**: attach Anonymizator to an AI Agent as a tool with Include Placeholder Map
    off and show the tool output carries no map.
 
 ## Placeholders to replace before sending
@@ -153,4 +183,4 @@ Run on the commit to be tagged:
 - TODO(api-key-portal): where users and reviewers get an API key (also in the README and the
   credential).
 - TODO(reviewer-key): a working key for the reviewer, and how it is delivered.
-- If the video was recorded against a version other than 0.1.1, correct the version row.
+- If the video was recorded against a version other than 0.2.0, correct the version row.

@@ -3,9 +3,14 @@
  * name. Shared by Protect and Detect.
  *
  * Filtering is local and happens after detection: the gateway still receives the whole text, and
- * the terms themselves never leave n8n. A detected span is dropped when its trimmed text equals a
- * term, compared case-insensitively after Unicode NFC normalisation. Only whole spans are compared;
- * a span that merely contains a term is kept.
+ * the terms themselves never leave n8n. A value is ignored when its trimmed text equals a term,
+ * compared case-insensitively after Unicode NFC normalisation. Only whole values are compared; a
+ * value that merely contains a term is kept.
+ *
+ * Protect hands `ignoredTermTest` to the pipeline as its `isSkipped` test (the extension's skipped
+ * values: applied after companies are typed and to Additionally protect and possible IDs too, while
+ * the values of an existing map are still replaced). Detect drops gateway spans with
+ * `filterIgnoredSpans`.
  */
 import type { Span } from './types';
 
@@ -37,6 +42,18 @@ export function parseIgnoreTerms(input: unknown): Set<string> {
 		if (term !== '') terms.add(fold(term));
 	}
 	return terms;
+}
+
+/**
+ * The test Protect passes as `isSkipped`: true when `value` (already trimmed by the caller; trimmed
+ * again here) equals one of `terms` (as returned by `parseIgnoreTerms`). Undefined when there are no
+ * terms.
+ */
+export function ignoredTermTest(
+	terms: ReadonlySet<string>,
+): ((value: string) => boolean) | undefined {
+	if (terms.size === 0) return undefined;
+	return (value: string) => terms.has(fold(String(value).trim()));
 }
 
 /**

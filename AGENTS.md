@@ -3,9 +3,11 @@
 An n8n community node package for the Anonymizator privacy gateway. **Protect** replaces personal
 data in text with placeholders before the text reaches an LLM; **Reveal** puts the original values
 back; **Detect** reports what a text contains without changing it. Only detection runs remotely:
-the text is HPKE-sealed to a stateless, ranges-only gateway that answers with entity positions. Substitution, the placeholder map, masking and reveal all happen
-inside n8n, in a TypeScript port of the Anonymizator browser extension's engine. The node is meant to
-pass n8n's community-node verification, like its accepted sibling `n8n-nodes-judgment`.
+the text is HPKE-sealed (protocol v2) to a stateless, ranges-only gateway that answers with entity
+positions. Substitution, the ID set and placeholder map, companies, Additionally Protect, possible
+IDs, masking and reveal all happen inside n8n, in a TypeScript port of the Anonymizator browser
+extension's Protect pipeline. The node is meant to pass n8n's community-node verification, like its
+accepted sibling `n8n-nodes-judgment`.
 
 Start with `README.md` for what the node does. This file covers how to work on it.
 
@@ -23,31 +25,40 @@ workflows store them, and the gateway and the browser extension rely on the wire
 | Credential | `anonymizatorApi` (class `AnonymizatorApi`, display name "Anonymizator API") | `credentials/AnonymizatorApi.credentials.ts`, `CREDENTIAL_NAME` in `shared/types.ts` |
 | Codex node id | `n8n-nodes-anonymizator.anonymizator` | `Anonymizator.node.json` |
 | Gateway base URL | `https://anon.prosecco37.com` (no base URL field, on purpose) | `GATEWAY_BASE_URL` in `shared/types.ts` |
-| Trust root (Ed25519, base64url) | `LuE5xR_dLWJhv1BAULCmpijiAV08ceZTeCSkBYLg-bc` | `TRUST_ROOT_B64URL` in `shared/keyconfig.ts` |
-| HPKE response exporter label | `'pgw response v1'` | `RESPONSE_EXPORT_LABEL` in `shared/hpke.ts` |
-| Keyconfig signature domain | `'pgw-keyconfig-v1\n'` (with the newline) | `KEYCONFIG_LABEL` in `shared/keyconfig.ts` |
-| Keyconfig `sig_alg` | `'ed25519-v1'` | `SIG_ALG` in `shared/keyconfig.ts` |
-| Wire version byte | `0x01` (request and response) | `WIRE_VERSION` in `shared/hpke.ts` |
-| ID file format | `{ format: 'anonymizator-id-file', version: 1 }` | `shared/placeholderMap.ts` |
+| Trust roots (Ed25519, base64url) | primary `lgcsJYcJVj99IW2N5rg73nkRmL0YkuU5uLkR1FsHfhc`, backup `ZeXBFyWu8WB0cvyjNIC4LKJymDe5HDb6H08JkcmwdpE` (the extension's `ROOT_KEYCONFIG_PUBKEYS`) | `TRUST_ROOTS_B64URL` in `shared/keyconfig.ts` |
+| Expected delegation audience | `anon.prosecco37.com` (hostname of `GATEWAY_BASE_URL`) | `EXPECTED_AUDIENCE` in `shared/gateway.ts` |
+| HPKE request `info` | `'pgw request v2'` | `REQUEST_INFO` in `shared/hpke.ts` |
+| HPKE response exporter label | `'pgw response v2'` | `RESPONSE_EXPORT_LABEL` in `shared/hpke.ts` |
+| Delegation / keyconfig document headers | `pgw-keyconfig-delegation-v2`, `pgw-keyconfig-v2` | `DELEGATION_HEADER`, `KC_DOCUMENT_HEADER` in `shared/keyconfig.ts` |
+| Capabilities document header | `'pgw-capabilities-v1\n'` (with the newline) | `CAPABILITIES_HEADER` in `shared/capabilities.ts` |
+| Wire version byte | `0x02` (request and response) | `WIRE_VERSION` in `shared/hpke.ts` |
+| ID file format | `{ format: 'anonymizator-id-file', version: 2 }` written; versions 1 and 2 read | `shared/placeholderMap.ts` |
+| Load-options method | `getEntityTypes` | `methods.loadOptions` in `Anonymizator.node.ts` |
 
 Parameter names (`operation`, `text`, `detect`, `entityTypes`, `placeholderStyle`, `placeholderMap`,
 and the `options` keys `existingPlaceholderMap`, `shareMapAcrossItems`, `includeIdFile`,
-`includeInputFields`, `includePlaceholderMap`, `ignoreTerms`, `includeValues`) and output field names
-(`protectedText`, `placeholderMap`, `entities`, `entityFilterIgnored`, `idFile`, `revealedText`,
+`includeInputFields`, `includePlaceholderMap`, `ignoreTerms`, `includeValues`, `additionallyProtect`,
+`includePossibleIds`), option values (the `entityTypes` row ids such as `PERSON`, `IBAN`, `EMSO`;
+`placeholderStyle` `random`/`sequential`/`typed`/`redacted`; `additionallyProtect`
+`NUMBER`/`AMOUNT`/`COMPANY`) and output field names (`protectedText`, `placeholderMap`, `entities`,
+`entityFilterIgnored`, `idFile`, `possibleIds`, `possibleIdsTruncated`, `revealedText`,
 `unresolvedPlaceholders`, `hasPersonalData`, `entityCount`, `countsByType`, and `entityType`,
-`start`, `end`, `score`, `placeholder`, `value` inside entities) are stored in, or read by, saved
-workflows. Treat them as frozen too. Adding one is fine; renaming one breaks users. New options must
+`start`, `end`, `score`, `placeholder`, `value`, `kind`, `type` inside entities and possible IDs) are
+stored in, or read by, saved workflows. Treat them as frozen too. Display names may change (the
+styles now carry the extension's names, Entity Types is "Entity Type Names or IDs" for the lint rule
+on dynamic options); values may not. Adding one is fine; renaming one breaks users. New options must
 default to the old behaviour (`includePlaceholderMap` defaults to `true` and is read as
-`!== false`, so a workflow saved before it existed keeps its map).
+`!== false`, so a workflow saved before it existed keeps its map; `additionallyProtect` defaults to
+`[]` and `includePossibleIds` to `false`).
 
 `n8n.nodes` / `n8n.credentials` in `package.json` point at compiled `dist/` paths and must be edited
 by hand on any rename. A stale entry makes the node silently not appear. The package name is
 unscoped and must stay that way: the community-node installer looks the name up verbatim. Do not
 add `publishConfig.access`.
 
-The wire strings are shared with the server and with the extension (`lib/hpke.js`,
-`lib/gateway.js`). Changing one byte breaks every request with `hpke_open_failed` or makes every
-keyconfig fail verification.
+The wire strings and pinned roots are shared with the server and with the extension (`lib/hpke.js`,
+`lib/gateway.js`, `lib/constants.js`). Changing one byte breaks every request with
+`hpke_open_failed` or makes every keyconfig and capabilities document fail verification.
 
 ## Commands
 
@@ -147,10 +158,10 @@ evidence for the others.
 
 | Layer | What it runs | What only it catches |
 | --- | --- | --- |
-| `npm test` (`test/*.test.mjs`, `node:test`) | The compiled `dist/` modules and the node class with a fake `IExecuteFunctions`. The gateway is a fake HPKE recipient written independently with `node:crypto`; keyconfigs are signed by an Ed25519 root generated in the test and injected through `analyze`'s `trustRootB64url` seam. `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 vector), wire format, every status mapping and retry path, the anonymizer port's behaviour, map parsing, ID file rules, Detect offsets and counts, Ignore Terms, Include Placeholder Map. Fast and offline. |
-| `npm run smoke` (`scripts/smoke.mjs`) | The compiled node against **production**, with a fake context whose `httpRequestWithAuthentication` does a real `fetch` and honours n8n's options (no redirect following, no throw on error statuses, full response, Buffer bodies, timeout). | The live contract: response shape, offset unit, status codes for a rejected key, detection on real sentences. |
-| `npm run e2e` (`scripts/e2e-n8n.mjs`) | `e2e/anonymizator-e2e.workflow.json` through a real n8n 2.41.7 in Docker over its REST API, then an import (no run) of every `examples/*/workflow.json` with the type prefix rewritten to `CUSTOM.`. | **n8n's parameter resolution**: expressions in json parameters, collections, the credential hidden by `displayOptions` on Reveal, the `CUSTOM.` type prefix, the tool variant being generated, icons being served; that every node type and version an example uses exists in this n8n (no "?" nodes on import). |
-| `npm run scan` (`scripts/scan.mjs`) | `@n8n/scan-community-package` 0.38.0 (lint plugin 0.35.0) on the source and on the `npm pack` tarball, as the verification pipeline does. | Rules newer than the local lint plugin, inline suppressions (which it ignores), unexpected files in the tarball. |
+| `npm test` (`test/*.test.mjs`, `node:test`; 1008 tests, 0 skipped, on 2026-10-22) | The compiled `dist/` modules and the node class with fake `IExecuteFunctions` / `ILoadOptionsFunctions`. Every case of the gateway's vectors (`test/fixtures/pgw-v2.json` and `pgw-capabilities-v1.json`, copied byte for byte from the gateway repository's `tests/vectors/`): keyconfig cases, request frame bytes, response open, sealed errors, the `possible_emoji` exchange, offsets, capabilities cases. A fake v2 gateway (`test/helpers/pgw.mjs`: an independent `node:crypto` recipient with a test root, delegation and keyconfig, injected through the `trustRootsB64url` seam) for every status and retry path. Differential and interop tests against the extension's real files (below). `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 and gateway vectors), the trust chain, wire format, every status mapping and retry path, the pipeline port's behaviour, map parsing, ID file rules, the catalog merge and filter, Detect offsets and counts, Ignore Terms, Include Placeholder Map, the new options. Fast and offline. |
+| `npm run smoke` (`scripts/smoke.mjs`, 24 scenarios) | The compiled node against **production**, with a fake context whose `httpRequestWithAuthentication` does a real `fetch` and honours n8n's options (no redirect following, no throw on error statuses, full response, Buffer bodies, timeout). | The live contract: keyconfig v2 and capabilities verifying against the pinned roots, response shape, offset unit, the text cap, status codes for a rejected key, detection on real sentences. |
+| `npm run e2e` (`scripts/e2e-n8n.mjs`) | `e2e/anonymizator-e2e.workflow.json` through a real n8n 2.44.5 in Docker over its REST API (19 nodes; "Protect No Map" also asserts Additionally Protect's `[AMOUNT_…]` and `[COMPANY_…]`, and "Check Typed" fails if the Type Only item, run with Include ID File on, has an `idFile`), a `getEntityTypes` call through `/rest/dynamic-node-parameters/options` that must return every bundled row plus at least one server-only type, then an import (no run) of every `examples/*/workflow.json` with the type prefix rewritten to `CUSTOM.`. | **n8n's parameter resolution**: expressions in json parameters, collections, the credential hidden by `displayOptions` on Reveal, the `CUSTOM.` type prefix, load options with a real credential, the tool variant being generated, icons being served; that every node type and version an example uses exists in this n8n (no "?" nodes on import). |
+| `npm run scan` (`scripts/scan.mjs`) | `@n8n/scan-community-package` 0.40.0 (lint plugin 0.37.0) on the source and on the `npm pack` tarball, as the verification pipeline does. | Rules newer than the local lint plugin, inline suppressions (which it ignores), unexpected files in the tarball. |
 
 **`smoke` never exercises parameter resolution.** It builds the parameter objects by hand, so its
 field names must be kept in step with the node's parameter definitions. When they drift it does not
@@ -164,15 +175,27 @@ gateway returned before "fixing" the node. Only synthetic data is ever sent; nev
 personal data to the gateway from a test.
 
 **Unit tests that compare against the extension skip when its checkout is missing.** The
-differential and interop cases load the extension's real `lib/anonymizer.js`, `lib/hpke.js`,
-`lib/entities.js`, `lib/constants.js` and `sidepanel/sidepanel-idfile.js` with `node:vm` from the
-checkout at `/Users/greg/Repos/projects/prosecco37/anonymizator-chrome`. For the anonymizer,
-entities and placeholder-map tests, `ANON_EXT_DIR` overrides the location, and it must point at the
-**`anonymizator-chrome-ext` subdirectory**, not the repo root (for example
-`ANON_EXT_DIR=/path/to/anonymizator-chrome/anonymizator-chrome-ext npm test`). The HPKE and keyconfig
-tests use the fixed repo-root path. A wrong path makes these tests **skip, not fail**, which looks
-like a pass: when checking for drift, look for `# SKIP extension checkout not found` in the output
-(`node --test --test-reporter=tap "test/*.test.mjs"`). In CI they are reported as skipped too.
+differential and interop cases load the extension's real `lib/anonymizer.js`, `lib/id-model.js`,
+`lib/id-rules.js`, `lib/id-names.js`, `lib/extra-detect.js`, `lib/id-possible.js`,
+`lib/id-edits.js`, `lib/hpke.js`, `lib/entities.js`, `lib/constants.js` and
+`sidepanel/sidepanel-idfile.js` with `node:vm` (the pipeline: 120 rounds x 4 steps x 4 styles
+against `anonIdEdits.anonymize`). The checkout is found through `ANON_EXT_DIR`, which must point at
+the **`anonymizator-chrome-ext` subdirectory**, not the repo root (for example
+`ANON_EXT_DIR=/path/to/anonymizator-chrome/anonymizator-chrome-ext npm test`), else
+`/home/ubuntu/repos/prosecco37/anonymizator-chrome/anonymizator-chrome-ext`, else the old
+`/Users/greg/Repos/projects/prosecco37/anonymizator-chrome/anonymizator-chrome-ext`
+(`test/helpers/pgw.mjs`, `test/engine-ext.mjs`, `test/placeholderMap.test.mjs`). A missing checkout
+makes these tests **skip, not fail**, which looks like a pass: when checking for drift, look for
+`# SKIP extension checkout not found` in the output (`node --test --test-reporter=tap
+"test/*.test.mjs"`). In CI they are reported as skipped too. The 2026-10-22 run had 0 skips.
+
+**The generated differential tests use `prng` from `test/engine-ext.mjs`, a mulberry32.** The
+earlier double-precision LCG lost its low bits after a few steps (`rnd(2)` stuck at 0), so the
+"generated" runs covered only a handful of cases; never replace it with an LCG over doubles. Each
+generated test also asserts that its inputs vary (distinct texts, several options on, entities and
+extras present, every separator used), so a degenerate generator fails instead of passing quietly.
+The perf tests (`timed()` in the same file) assert ratios or generous limits measured in the same
+run, not tight wall-clock numbers, because they run on loaded machines.
 
 **Tests live in `test/`, never under `nodes/`.** `nodes/` is compiled, shipped and scanned:
 `no-dead-files` would flag test files there and `no-hardcoded-secrets` would trip on the RFC vectors
@@ -243,26 +266,43 @@ read `process.env.ANON_API_KEY` first and fall back to parsing that file.
 
 ```
 nodes/Anonymizator/
-  Anonymizator.node.ts      INodeType: description, operation switch, execute loop, catch block
+  Anonymizator.node.ts      INodeType: description, operation switch, execute loop, catch block,
+                            methods.loadOptions.getEntityTypes
   Anonymizator.node.json    codex: categories ["Utility", "Development"], alias (panel search), doc links
   actions/
-    protect.ts              protectDescription + executeProtect; GatewayError -> friendly n8n error;
-                            shared helpers (readTextParameter, readEntityTypes, IGNORE_TERMS_OPTION)
-    detect.ts               detectDescription + executeDetect; counts, offsets into the original
+    protect.ts              protectDescription + executeProtect; ID set per item or shared, merge;
+                            mergeState, outputMap; shared helpers (detectRemotely, gatewayFailure,
+                            readTextParameter, readEntityTypes, loadEntityTypeOptions, withoutFields,
+                            IGNORE_TERMS_OPTION)
+    detect.ts               detectDescription + executeDetect; companies, trimming, counts, offsets
+                            into the original
     reveal.ts               revealDescription + executeReveal; unresolvedPlaceholders
   shared/
-    hpke.ts                 RFC 9180 seal (Base mode, single shot), wire frame, padding, base64url
-    keyconfig.ts            TRUST_ROOT_B64URL, signed-message builder, verify (fail closed), validate
-    gateway.ts              keyconfig fetch + 10 min cache, sealed /v1/analyze, status mapping, retries
+    hpke.ts                 RFC 9180 seal (Base mode, single shot), v2 frames, padding, response open
+    keyconfig.ts            TRUST_ROOTS_B64URL, strict delegation/keyconfig v2 parsers, verifyDelegationV2,
+                            verifyKeyconfigV2 (fail closed, key selection)
+    capabilities.ts         strict pgw-capabilities-v1 parser, verifyCapabilitiesV1
+    gateway.ts              keyconfig acquisition (cache, serial floor), sealed /v1/analyze, capabilities
+                            fetch, error allowlists, retries, effectiveMaxTextChars
+    gatewayMessages.ts      GATEWAY_MESSAGES, LOCAL_FAILURES, gatewayErrorText (extension wording)
     anonymizer.ts           port of the extension's lib/anonymizer.js + mask/isValidKey from id-set.js
-    entities.ts             ENTITY_CATALOG (16 rows), selectionToEntityTypes
-    ignoreTerms.ts          parseIgnoreTerms + filterIgnoredSpans (Protect and Detect)
-    placeholderMap.ts       one map normaliser for every input format; ID file v1 writer
+    idModel.ts              ID set model: types and prefixes, legal forms, companySpans, fromV1,
+                            flatTypeFromKey, revealTable, own-placeholder test, extraBlockTest
+                            (id-model.js, id-rules.js, id-names.js)
+    protectPipeline.ts      protect() = anonIdEdits.anonymize; emptyState, fromFlatMap, detectedValues
+    extraDetect.ts          Additionally Protect: NUMBER / AMOUNT / COMPANY spans, mergeExtra
+    possible.ts             possible IDs: findPossible, detectedValues (id-possible.js)
+    entities.ts             ENTITY_CATALOG (16 rows) + ENTITY_GROUPS, mergeCatalog, entityOptions,
+                            entityFilter
+    ignoreTerms.ts          parseIgnoreTerms, ignoredTermTest (Protect), filterIgnoredSpans (Detect)
+    placeholderMap.ts       one map normaliser for every input format incl. ID file v1/v2; v2 writer
     types.ts                shared types, GATEWAY_BASE_URL, CREDENTIAL_NAME, GATEWAY_TIMEOUT_MS
-    errors.ts               errorNode() guard, GatewayError, PlaceholderMapError
+    errors.ts               errorNode() guard, GatewayError (GatewayErrorCode), PlaceholderMapError
 credentials/AnonymizatorApi.credentials.ts   apiKey, generic Bearer, test on GET /v1/keyconfig
 icons/anonymizator{,.dark}.svg               from the extension's aperture symbol; light != dark
 test/*.test.mjs                              node --test against dist/ (see "Test layers")
+test/helpers/pgw.mjs, test/engine-ext.mjs    fake v2 gateway, extension loaders (node:vm)
+test/fixtures/pgw-v2.json, pgw-capabilities-v1.json   gateway vectors, byte for byte
 scripts/
   smoke.mjs                 the node against production, no n8n
   e2e-n8n.mjs               the node through Docker n8n over REST
@@ -273,7 +313,7 @@ e2e/anonymizator-e2e.workflow.json   19-node workflow with asserting Code nodes
 examples/protect-llm-reveal/         importable example workflow + README (not shipped)
 docs/verification-submission.md      cover note, reviewer notes, video outline (not shipped)
 SECURITY.md                          private reporting, scope (not shipped)
-docker-compose.yml          n8n 2.41.7 with only dist/ and package.json linked in
+docker-compose.yml          n8n 2.44.5 with only dist/ and package.json linked in
 dist/                       build output, gitignored, referenced by package.json
 ```
 
@@ -292,68 +332,97 @@ break offline use and the privacy claim in the README.
 `node:crypto` and relative paths. The lint rule `no-restricted-imports` also lets any
 **devDependency** through, and that is a trap: the build does not bundle, so such an import passes
 lint and then fails at runtime in the user's n8n. `files` is `["dist", "NOTICE"]`; `npm pack` yields
-51 files (`dist/`, `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm always
-adds). `npm run scan` fails on anything else in the tarball.
+69 files, 164 kB (`dist/`, `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm
+always adds). `npm run scan` fails on anything else in the tarball.
 
 **Requests go through n8n's helper.** `gateway.ts` calls
-`ctx.helpers.httpRequestWithAuthentication.call(ctx, 'anonymizatorApi', options)` with the execute
-context as `this` (using `helpers` as `this` gives "this.getNode is not a function"). That brings
-n8n's proxy support and the credential's `authenticate` block along.
+`ctx.helpers.httpRequestWithAuthentication.call(ctx, 'anonymizatorApi', options)` with the context
+as `this` (using `helpers` as `this` gives "this.getNode is not a function"). That brings n8n's
+proxy support and the credential's `authenticate` block along. `GatewayContext` is the minimal
+interface both `IExecuteFunctions` and `ILoadOptionsFunctions` satisfy, so `getEntityTypes` fetches
+capabilities through the same path.
 
 **One gateway round trip per item.** `/v1/analyze` takes one `text` per sealed request; there is no
-batch endpoint. Blank text never leaves n8n.
+batch endpoint. Blank text never leaves n8n (no capabilities or keyconfig request either), and text
+over the cap is refused before the text is sealed or sent.
 
 ## Compliance model
 
 - **Ranges only.** The gateway receives the sealed text and answers with
-  `{"entities": [{"entity_type", "start", "end", "score"}]}`. It keeps nothing and never sees a
-  placeholder or a map. Placeholder allocation, substitution, PERSON sub-keys, masking, the ID file
-  and Reveal are computed locally. Do not add a feature that sends a map, a placeholder or revealed
-  text to the gateway.
+  `{"entities": [{"entity_type", "start", "end", "score"}]}` (plus `possible: [{start, end,
+  entity_type}]` when asked). It keeps nothing and never sees a placeholder or a map. Placeholder
+  allocation, substitution, PERSON sub-keys, companies, Additionally Protect, possible IDs, masking,
+  the ID file and Reveal are computed locally. Do not add a feature that sends a map, a placeholder
+  or revealed text to the gateway.
 - **Sealed end to end.** The text is HPKE-sealed to the gateway's current X25519 key, so the CDN and
-  the BFF in front of the gateway see only ciphertext. The response is sealed back with a key
-  exported from the same context. The README's "What leaves n8n" table lists every field sent;
-  keep it in step with `gateway.ts` and `hpke.ts`.
-- **Local filters stay local.** Ignore Terms and Include Values are applied after detection and are
-  never sent; the gateway always gets the whole text.
-- **Signed keyconfig, fail closed.** `GET /v1/keyconfig` must carry an Ed25519 signature by the
-  pinned trust root over `'pgw-keyconfig-v1\n'` followed by `"${key_id}:${public_key}\n"` for each key
-  sorted by numeric `key_id` (`public_key` exactly as the JSON string). A wrong `sig_alg`, a missing
-  or bad signature, or an entry without an integer `key_id` and a string `public_key` aborts the
-  item with `hpke_unverified_keyconfig`. A response that is not JSON with a non-empty `keys` array
-  (for example an HTML login page), or a verified key whose `suite` is wrong or whose key does not
-  decode to 32 bytes, aborts it with `hpke_bad_keyconfig`. Both happen before the text is sealed,
-  and a failed config is never cached. The `hpke_unverified_keyconfig` message says this can mean
-  interception (for example a TLS-inspecting proxy). Never
-  add a "skip verification" option, and never port the extension's "empty root key = warn and allow"
-  branch.
-- **Unsigned fields are not trusted.** Only `key_id` and `public_key` are covered by the signature.
-  `suite` is checked (must be `{kem: 32, kdf: 1, aead: 2}`), the key must decode to 32 bytes and
-  `key_id` must be an integer in `[0, 2^32-1]`, but `not_after` is ignored for every decision.
-  `keys[0]` is used, as the extension does.
+  the BFF in front of the gateway see only ciphertext. The response is sealed back with keys derived
+  from the same context. The README's "What leaves n8n" table lists every field and request sent
+  (keyconfig, capabilities, analyze); keep it in step with `gateway.ts` and `hpke.ts`.
+- **Local filters stay local.** Ignore Terms, Include Values, Additionally Protect and the local
+  possible-ID rules are applied after detection and are never sent; the gateway always gets the
+  whole text. The only request fields besides `text` are `entities` (Selected Types, unless every
+  bundled row is selected) and `possible: true` (Include Possible IDs, and only when the verified
+  capabilities list possible types, as the extension does).
+- **Signed keyconfig v2, fail closed** (gateway `docs/HPKE.md`, "Keyconfig" and "Client
+  conformance"). `GET /v1/keyconfig` must carry a `v2` member that verifies through the chain
+  pinned root (`TRUST_ROOTS_B64URL`, exact string compare) -> root-signed delegation
+  (`pgw-keyconfig-delegation-v2`, lifetime <= 32 days, `serial` within 300 s of `not_before`,
+  `audience` containing `anon.prosecco37.com`) -> keyconfig (`pgw-keyconfig-v2`, `suite=32,1,2`,
+  signed by the delegated key inside the delegation's window, `issued_at` at most 15 minutes old,
+  300 s skew) -> keys with a signed `not_after`. The key used is the **highest `key_id` with
+  `now + 300 < not_after`**, never `keys[0]`. Parsers are strict: raw bytes checked before decoding,
+  canonical base64url, full-regex numbers, Ed25519 signatures with the S < L check; nothing
+  canonicalises JSON. The top-level v1 fields are never read and there is **no v1 fallback, ever**:
+  a missing or failing `v2` is `hpke_unverified_keyconfig` (an HTML login page included),
+  `hpke_stale_keyconfig` for a time window that does not hold by this clock, `hpke_no_usable_key`
+  when no key stays valid long enough. All happen before the text is sealed, and the item stops with
+  a NodeOperationError whose message says this can mean interception (for example a
+  TLS-inspecting proxy). Never add a "skip verification" option. An empty root list trusts nothing
+  (as in the extension; its old v1 "empty root = warn and allow" branch is gone and must not
+  return).
+- **Delegation serial floor.** A module-level floor (per n8n process) holds the highest delegation
+  `serial` that ever verified; a lower one is refused, so a stolen older delegated key cannot be
+  replayed once the renewal was seen. Only a successful keyconfig acquisition raises it;
+  capabilities only read it. Renewal race (as the extension's `acquireHpkeConfig`): when a replica
+  still serves the older delegation, the previously verified config is kept if it still verifies
+  against the floor, else the keyconfig is fetched once more after 2 s.
+- **Capabilities can only add.** `GET /v1/capabilities` (`pgw-capabilities-v1`) is verified with the
+  same delegation rules (`verifyCapabilitiesV1`, `issued_at` at most 2 h old). It adds entity types,
+  labels and groups to the bundled catalog and sets the local text cap (within 10 000 to 1 000 000); it never
+  removes a bundled row or a type a bundled row sends, `possible` types never become rows, and an
+  omitted `entities` filter still means every type the server has. Any failure (404 from an older
+  gateway, auth, HTTP, verification, stale, below the floor) gives `null` and the bundled data:
+  passive, never an error.
 - **n8n stores what passes through it.** Execution data contains the original text and the map. The
-  Protect/Detect notice tells users to restrict saved executions. The map is the re-identification
-  key. Our own Protect output contains the originals (in `placeholderMap`), so never claim that
-  originals never appear in the output; the claim is about **where** the map is made and kept
-  (locally; the gateway sees only the encrypted text and returns positions).
+  Protect/Detect notice tells users to restrict saved executions. The map and the ID file are the
+  re-identification key; the ID file is written only for Random and Numbers in Order, never for the
+  masked styles. Our own Protect output
+  contains the originals (in `placeholderMap`, `idFile`, and `possibleIds` values, which are text
+  still in clear), so never claim that originals never appear in the output; the claim is about
+  **where** the map is made and kept (locally; the gateway sees only the encrypted text and returns
+  positions). Protect's `entities` never carry `value` or `key`, so with Include Placeholder Map off
+  the output holds no protected value.
 
-### Rotating the trust root
+### Rotating the trust roots
 
-The root is pinned in two places that must agree: `TRUST_ROOT_B64URL` in `shared/keyconfig.ts` here
-and `ROOT_KEYCONFIG_PUBKEY` in the extension's `lib/constants.js`. The signing key itself is a
-gateway secret (`PGW_KEYCONFIG_SIGNING_KEY`), never in this repo.
+The roots are pinned in two places that must agree: `TRUST_ROOTS_B64URL` in `shared/keyconfig.ts`
+here and `ROOT_KEYCONFIG_PUBKEYS` in the extension's `lib/constants.js` (a unit test compares
+them). Both list the **primary and the backup v2 root**. The root seeds are offline operator
+secrets (gateway `docs/HPKE.md`, "Keys: lifecycle and custody"), never in this repo; the online signer is the
+delegated key, renewed about every three weeks with a new delegation, which needs no client change.
+Never pin the v1 root `LuE5xR_...` or a test-vector root.
 
-`verifyKeyconfig` accepts exactly one root today, so a naive rotation is a flag day: every installed
-version fails closed with "possible interception" the moment the gateway signs with a new root. Do
-it in steps:
+People rarely update n8n nodes, so plan for installed versions that never update:
 
-1. Change `verifyKeyconfig` to accept a list (old and new root) and keep the test seam. Add the new
-   root, release, and keep the old root in the list.
-2. Wait until users have updated (and the extension has shipped the same change).
-3. Switch the gateway's signing key.
-4. Remove the old root in a later release.
-
-A compromised root is the exception: remove it immediately, release, and accept the breakage.
+1. **Compromised root.** The gateway switches its delegations to the other pinned root at once; every
+   installed version keeps working because both roots are pinned. Then release a version whose list
+   drops the compromised root and adds a new backup (the extension ships the same list), and accept
+   that old installs keep trusting the compromised root until they update.
+2. **Planned replacement.** Add the new root to the list (keep both current ones), release, and wait
+   until users and the extension have updated. Only then switch the gateway to delegations signed
+   by the new root, and remove the retired root in a later release.
+3. Keep the list short and identical to the extension's; a root that is in only one of them is a
+   flag day for the other client.
 
 ## Crypto design
 
@@ -366,12 +435,23 @@ A compromised root is the exception: remove it immediately, release, and accept 
 - **Suite fixed, no negotiation:** DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, Base mode,
   single shot (sequence 0 only). HKDF is built from HMAC; an empty HMAC key becomes 32 zero bytes,
   as in the extension (RFC 5869's absent salt), so outputs match byte for byte.
-- **Request frame:** `0x01 || key_id u32BE || unix seconds u64BE || enc(32) || ct`, AAD = the 13-byte
-  prefix, `info` empty. Plaintext is `JSON.stringify({ text, entities? })` padded with spaces to
-  256 / 1024 / 4096 / 16384 / 65536 UTF-8 bytes, then to the next multiple of 4096. Padding is part
-  of the privacy design (body length must not track content length).
-- **Response frame:** `0x01 || ct`, key and nonce = `export('pgw response v1', 44)`, empty AAD,
-  JSON padded with spaces (trimmed before parsing).
+- **Protocol v2 only.** v1 is sunset and its code is gone from the request path (the extension
+  removed it too). Never add a v1 fallback.
+- **Request frame:** `0x02 || key_id u32BE || unix seconds u64BE || enc(32) || ct`, AAD = the 13-byte
+  prefix, HPKE `info` = `'pgw request v2'`. Plaintext is `JSON.stringify({ text, entities?,
+  possible? })` (UTF-8, no ASCII escaping) padded with spaces to 256 / 1024 / 4096 / 16384 / 65536
+  UTF-8 bytes, then to the next multiple of 4096. Padding is part of the privacy design (body length
+  must not track content length).
+- **Response frame** (success and every post-open error): `0x02 || response_nonce(32) || ct`, with
+  (RFC 9458 section 4.4, plain HKDF-SHA256) `secret = export('pgw response v2', 32)`,
+  `prk = HKDF-Extract(enc || response_nonce, secret)`, key / nonce = HKDF-Expand `'key'` (32) /
+  `'nonce'` (12), empty AAD, JSON padded with spaces (trimmed before parsing).
+- **Every HTTP attempt is sealed afresh.** The gateway keeps each frame's `enc` for about 61 s and
+  refuses a resent frame with `hpke_replay`; a retry with the old frame would fail.
+- **Ed25519 via `verify(null, ...)`** plus an explicit S < L check (RFC 8032 5.1.7) against
+  malleated signatures. Node's verify accepts an all-zero signature for the all-zero (small-order)
+  public key; harmless here, because keys come only from the pinned roots or a root-signed
+  delegation (WebCrypto behaves the same).
 - **Buffer-only HTTP bodies.** axios sends `data.buffer` for any ArrayBuffer view that is not a
   `Buffer`, so a `Uint8Array.subarray` would put the **whole underlying buffer** on the wire. Hand
   n8n a `Buffer` (`Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength)` when converting).
@@ -384,32 +464,53 @@ A compromised root is the exception: remove it immediately, release, and accept 
 ## The gateway contract
 
 Every request uses `{ disableFollowRedirect: true, ignoreHttpStatusErrors: true,
-returnFullResponse: true, encoding: 'arraybuffer', json: false, timeout: 30000 }` and branches on
-`statusCode` and the content type. The response body is always a Buffer, JSON error bodies included.
+returnFullResponse: true, encoding: 'arraybuffer', json: false, timeout }` (30 s for analyze, 15 s for
+keyconfig and capabilities) and branches on `statusCode` and the content type. The response body is
+always a Buffer, JSON error bodies included. GETs send `Accept: application/json`; the analyze POST
+sends `Content-Type: application/octet-stream` and `Accept: application/octet-stream,
+application/json`.
 
 ### Status mapping
 
+Port of the extension's `gatewayFetch` / `analyzeSealed`. An `application/octet-stream` answer, **of
+any status**, is opened with the request's HPKE context and classified by content: exactly one of
+`entities` (an array: success) or `error` (a sealed error code). Sealed v2 errors usually arrive
+with **HTTP 200**.
+
 | Response | Code | Node behaviour |
 | --- | --- | --- |
-| 302 (or any 3xx) | `auth_required` | "The Anonymizator API key was rejected" (NodeApiError). |
-| 401 | `auth_required` | Same. |
+| 302 (or any 3xx), 401 | `auth_required` | "The Anonymizator API key was rejected" (NodeApiError). |
 | 403 `{"error":"missing_role"}` | `no_access` | "This API key has no access to Anonymizator". |
-| other 403 | `http_403` | Generic unexpected-status error. |
-| 413 | `text_too_large` | Mapped, but production has never sent it (see below). |
-| 429 | `rate_limited` | Mapped with `Retry-After` when present; no automatic retry loop. |
-| 4xx `application/octet-stream` | sealed server error | Opened with the request's context to read `{error, detail}`. |
-| 400 / 415 JSON | `{error}` passed through | `hpke_required`, `hpke_open_failed`, `hpke_stale`, ... |
-| `hpke_unknown_key` | | Refetch the keyconfig (bypassing the cache) and reseal **once**. |
-| `invalid_entities` with a filter sent | | Retry **once** without `entities`; output `entityFilterIgnored: true`. Never retried without a filter. |
-| `hpke_stale` | | "the n8n host's clock is off". Not yet seen live. |
-| 5xx | | Retry once after 500 ms (keyconfig and analyze), then `server_error` ("temporarily unavailable"). A sealed body over 256 KiB is not retried and is reported as `text_too_large` (with the HTTP status kept), because splitting the text is the only advice that helps. |
-| no response | `timeout` / `offline` | NodeOperationError. |
-| 200 that does not open | `hpke_bad_response` | NodeOperationError. |
+| other 403 | allowlisted code, else `http_403` | |
+| 429 | `rate_limited` | `Retry-After` (integer 1-300 s) adds "Try again in N s."; no automatic retry. |
+| other 4xx / 5xx plain JSON | `{error}` through `KNOWN_ERROR_CODES` (the extension's allowlist), else `http_<status>` / `server_error` | The JSON is unauthenticated: `detail` / `error_description` are never kept or shown. |
+| sealed answer with `error` | through `SEALED_ERROR_CODES` (`invalid_payload`, `invalid_entities`, `payload_too_large`, `hpke_bad_payload`, `internal_error`), else `http_<status>` | |
+| `hpke_unknown_key`, `hpke_key_expired` | | Refetch the keyconfig (bypassing the cache) and send once more with a fresh seal. |
+| plain (unsealed) 5xx, `busy`, sealed `internal_error` | | Send once more with a fresh seal after 1 s, then the "temporarily unavailable" message. The HTTP status of a sealed answer is unauthenticated and never triggers a retry: a sealed `invalid_payload` with HTTP 503, or an octet-stream 5xx that does not open, is not resent. |
+| `hpke_replay`, `rate_limited`, `hpke_stale` | | Never retried. `hpke_stale`: "The n8n host's clock is off". |
+| `invalid_entities` with a filter sent | | One more analysis without `entities`; output `entityFilterIgnored: true`. Never without a filter. |
+| keyconfig 5xx (plain) | | Fetched once more at once (harmless to resend). |
+| text over `effectiveMaxTextChars` | `payload_too_large` | Local, before anything is sealed: "The text is too long" with the real limit. A 413 from the BFF or a sealed `payload_too_large` gets the same title with a description that names no number ("The Anonymizator gateway refused the text as too long for one request..."), because the text already passed the local cap. |
+| no response | `timeout` / `offline` | NodeOperationError. This includes n8n-core's wrapping: `httpRequestWithAuthentication` rethrows every axios failure as a `NodeApiError`, so a NodeApiError without a 3-digit HTTP status whose `cause` is a plain Error (ECONNREFUSED, ENOTFOUND, ECONNABORTED, ETIMEDOUT...) is mapped from the cause's code and message (`passesThrough` in `gateway.ts`). A NodeOperationError, a NodeApiError with a real status, or one around an n8n error (a missing credential) passes through unchanged. |
+| 2xx that is not sealed, does not open, or has a span outside the text | `hpke_bad_response` | NodeOperationError (fail closed). |
 
-Client-side failures (`hpke_unverified_keyconfig`, `hpke_bad_keyconfig`, `hpke_seal_failed`,
-`hpke_bad_response`, `timeout`, `offline`) become `NodeOperationError` even when a response arrived;
-the rest become `NodeApiError` with the HTTP code. The wording lives in `GATEWAY_MESSAGES` in
-`actions/protect.ts`.
+So an analysis is at most **two HTTP attempts**, each freshly sealed, and the `invalid_entities`
+fallback is one more analysis. The old 500 ms retry and the "sealed body over 256 KiB" rule are gone.
+New codes since 0.1.1: `hpke_bad_frame`, `hpke_bad_version`, `hpke_key_expired`, `hpke_bad_payload`,
+`hpke_replay`, `hpke_not_configured`, `hpke_bad_key_material`, `payload_too_large`,
+`invalid_payload`, `internal_error`, `busy`, `upstream_unavailable`, `upstream_timeout`,
+`unauthenticated`, `missing_role`, and the client-side `hpke_stale_keyconfig`, `hpke_no_usable_key`
+(`hpke_bad_keyconfig` and `text_too_large` remain in the union and the wording table but are no
+longer produced).
+
+Local failures (`LOCAL_FAILURES`: the keyconfig codes, `hpke_seal_failed`, `hpke_bad_response`,
+`timeout`, `offline`, and a `payload_too_large` without an HTTP status) become `NodeOperationError`
+even when a response arrived; the rest become `NodeApiError` with the HTTP code. The wording lives in
+`GATEWAY_MESSAGES` in `shared/gatewayMessages.ts`, taken from the extension's
+`sidepanel/sidepanel-constants.js` and adapted to n8n; `gatewayErrorText` adds the Retry-After
+sentence and, only for the local refusal (no `httpCode`), the real character limit, and
+interpolates nothing but numbers. `analyze()` passes `maxTextChars` only for that local refusal. Every message ends
+with `(code: ...)` in the description.
 
 ### 302, not 401, unless you ask for JSON
 
@@ -423,26 +524,42 @@ The BFF in front of the gateway decides by the `Accept` header (probed 2026-10-0
   `{"error":"unauthenticated","error_description":"no valid session; ...","login_url":"..."}`.
 
 Both are mapped the same way, in the code and in the credential test's rules (302, 401, 403). Do not
-drop either.
+drop either. The capabilities fetch is passive: there a 3xx, 401 or 403 gives the cached document or `null`
+(bundled catalog), never an error, and does not start the 5-minute backoff (see the caches below).
 
-### Offsets and surrogate sanitising
+### Offsets
 
-Production returns offsets in **code points** (Python/Presidio), not JavaScript UTF-16 indices.
-Instead of converting, `sanitizeForOffsets` replaces every surrogate code unit with a space before
-sealing. A pair becomes two spaces, the sent string has no astral characters, so its code-point
-length equals its UTF-16 length equals the original's, and any span indexes the **original** text
-whatever unit the server uses. Emoji are never personal data. Span edges are then trimmed of
-whitespace (which includes those stand-in spaces), so a span can never start or end inside an emoji,
-and spans that become empty are dropped. Spans arrive unsorted; the client sorts them and skips
-overlapping or out-of-range ones. Smoke confirmed correct offsets for text with emoji before a name.
+The gateway returns offsets in **code points** (Python/Presidio), not JavaScript UTF-16 indices. The
+text is sent **exactly as given** (the old surrogate-to-space `sanitizeForOffsets` is gone), and
+`codePointSpansToUtf16` converts every span against that same text, as the extension does. It fails
+closed: a non-integer offset, an empty or reversed span, or one past the end makes the **whole
+answer** `hpke_bad_response`, never a partly protected text. A lone surrogate counts as one code
+point on both sides. Span edges are no longer trimmed by the gateway layer. Spans arrive unsorted;
+they are sorted by start, longest first, and the substitution skips overlaps. An entity type outside
+`^[A-Z][A-Z0-9_]{0,63}$` is kept as `PII` (protected, generic label), in Protect and Detect. The
+`possible` member is validated the same way (array of at most 10 000 `{start, end, entity_type}`,
+any malformed entry fails the answer), and possible spans overlapping an entity are dropped. The
+gateway vectors' `offsets` and `possible_emoji` cases pin this.
 
-### Other live findings (production, 2026-10-05)
+### Live findings (production)
 
-- Keyconfig and the decrypted analyze answer have exactly the shapes above. Scores seen: 0.85 and 1.
-- Unknown entity filter: plain JSON `400 invalid_entities`, not a sealed error. The retry handles
-  both forms.
-- Size: there is no 413. 100k characters analyse in about 5 s; 1M characters give a **502** after
-  about 13 s. The README suggests keeping items under about 100k characters.
+2026-10-21 (smoke 24/24 on the integration commit):
+
+- Keyconfig v2 verifies against the pinned roots: key id 113, delegation serial 1792597552.
+- Capabilities verify; `server_version` 2026.10.19.1, 19 entity types, all `default: on` (including
+  `IBAN_CODE`, `IT_FISCAL_CODE`, `SOCIAL_HANDLE`). Server-only rows in the merged list:
+  `IT_FISCAL_CODE` ("Codice fiscale (IT)", group Italy) and `SOCIAL_HANDLE` ("Social handles",
+  General). **No `possible` types** (so `"possible": true` is
+  never sent today and Include Possible IDs lists only the local rules), label languages `en`, `sl`.
+- "Modra Vila d.o.o." came back as one LOCATION span including the legal form; `companySpans` (same
+  as the extension) does not retype it, so it is `[LOCATION_...]`, not `[COMPANY_...]`. Server-side.
+
+Earlier (2026-10-05/06, protocol v1; the detection notes still apply):
+
+- Scores seen: 0.85 and 1.
+- Size: 100k characters analysed in about 5 s; 1M characters gave a **502** after about 13 s. Text
+  over the cap is now refused locally (and the BFF answers an oversized frame with a plain 413
+  `payload_too_large`, gateway `docs/HPKE.md`).
 - Detection quirks are server-side, not client bugs: "Janez Novak wrote from ..." and
   "Marko Horvat (...)" were not tagged PERSON; "Ana Kovač" was tagged as only "Kovač"; with a
   PERSON-only filter, "IBAN SI56" was tagged PERSON.
@@ -452,60 +569,158 @@ overlapping or out-of-range ones. Smoke confirmed correct offsets for text with 
   (`ff46e51`) shows bare digit patterns; it predates this, so do not judge production by it. A spaced
   IBAN came back as `IBAN`, but the catalog also maps `IBAN_CODE`, so docs check both.
 - `GET /health` is public and returns 200 with an empty body. Never use it to test anything.
-- Not yet exercised live: `hpke_stale`, 429.
+- Not yet exercised live: `hpke_stale`, `hpke_replay`, 429, `busy`, a key rotation mid-run.
 
-### Keyconfig cache
+### Keyconfig and capabilities caches
 
-A module-level `Map` keyed by base URL and trust root, 10-minute TTL with `Date.now()` (timers are
-banned). A key-rotation reseal forces one refetch, and only one, per `analyze` call. The cache lives
-for the n8n process; a stale entry costs one `hpke_unknown_key` round trip.
+Module-level `Map`s keyed by base URL and the pinned roots (so a test seam never shares state with
+production), with `Date.now()` (timers are banned); they live for the n8n process.
+
+- **Keyconfig:** the raw JSON is cached for 10 minutes and **re-verified on every use** (time
+  windows, key expiry, the serial floor), never trusted as stored; an entry that no longer verifies
+  is dropped and fetched once. A failed config is never cached. Acquisitions are serialised (one at
+  a time per process). A rotation retry (`hpke_unknown_key` / `hpke_key_expired`) forces one
+  refetch.
+- **Capabilities:** a verified document is reused for 5 minutes (re-checked against its time window
+  and the floor on every use); after a failed attempt the next one waits 5 minutes, and a cached
+  document that still verifies is kept meanwhile. A missing credential (n8n's own error, nothing
+  sent) or a 3xx, 401 or 403 is **not an attempt**: it returns the cached document (or `null`) and
+  starts no backoff, because the cache is per process and shared by every credential. This goes
+  further than the extension, which skips the backoff only for `auth_required` (not signed in). The
+  cost: a deployment whose `/v1/capabilities` keeps answering 3xx/401/403 gets one capabilities GET
+  per item. `fetchCapabilities` never throws.
+- `effectiveMaxTextChars(caps)` = `min(max_text_chars, floor((max_body_bytes - 8192) / 6))` when
+  that lies in [10 000, 1 000 000], else the bundled 120 000.
+- `clearGatewayCaches()` resets all of it (tests).
 
 ## Placeholders, maps and the extension
 
+### The ID set and the Protect pipeline
+
+Protect works on an **ID set** (`PipelineState` = the extension's state v2 content, `idModel.ts`):
+`ids` (records `{value, key, type, mine, main}`, newest first; `main: false` marks other members of
+a group), `subKeys` (PERSON name parts `{of, value, rec}`), `aliases` (reveal-only placeholders),
+`used` (retired keys) and `numbering`. `protect(state, text, spans, {extra, detected, isSkipped,
+findPossible})`
+in `protectPipeline.ts` is the extension's `anonIdEdits.anonymize`, in its order: companies by legal
+form (`companySpans`), skipped values dropped, Additionally Protect spans merged with the gateway and
+table spans (`mergeExtra`), prefixes (`withPrefixes`), `anonymizeReserved` around the CDN-mirrored
+`anonymizeFromSpans`, new records stored, one relabel / mask splice, then the possible IDs
+(skipped with `findPossible: false`, which Protect passes when Include Possible IDs is off; the
+default is on, as in the extension). It mutates the state in place; `revealTable(state)` is the reveal table. The item's state is the ID
+file's set when Existing Placeholder Map is an ID file, else `fromFlatMap` (= `anonIdModel.fromV1`)
+of the flat map; **the node's Placeholder Style always wins** over a file's `numbering` (the
+extension locks numbering per set instead), and a masked style drops reveal-only aliases.
+
 ### Placeholder styles
 
-`random` (default, `[PERSON_a7k2q]`: 5 characters a-z0-9, lowercase so the suffix never reads as part
-of the uppercase type), `sequential` (`[PERSON_1]`, continuing the counters already in the map),
-`typed` (`[PERSON]`, masking) and `redacted` (`[REDACTED]`, masking). Masked styles mint nothing,
-output `placeholderMap: {}` and never produce an ID file. PERSON entries also mint `KEY_NAME` (first
-token) and `KEY_SURNAME` (the rest) after stripping leading titles (Mr, Dr, Herr, gospa, `g.`, ...),
-so "Janez" alone later reveals correctly. Sub-keys never overwrite an existing entry.
+`random` (default, display name **Random**, `[PERSON_a7k2q]`: 5 characters a-z0-9, lowercase so the
+suffix never reads as part of the uppercase type), `sequential` (**Numbers in Order**, `[PERSON_1]`,
+continuing the counters already in the set), `typed` (**Type Only**, `[PERSON]`, masking) and
+`redacted` (**Redacted**, `[REDACTED]`, masking). Placeholders use the extension's **prefixes**:
+`EMAIL_ADDRESS` -> `[EMAIL_x7gs2]`, `PHONE_NUMBER` -> `[PHONE_...]`, `IBAN_CODE` -> `[IBAN_...]`,
+otherwise the type code; Type Only prints `[EMAIL]`, `[PHONE]`, `[IBAN]`, `[COMPANY]`. The output
+`entityType` stays the record type (`EMAIL_ADDRESS`), and old keys such as `EMAIL_ADDRESS_x` in an
+existing map still work. Masked styles **mint records too** (random internal keys, as the extension
+does) but print `[PREFIX]` / `[REDACTED]` and output `placeholderMap: {}`; Include ID File writes
+nothing for them (as before the parity work), so a workflow saved with Type Only or Redacted and
+Include ID File on never starts to output the real values. PERSON entries also mint `KEY_NAME` (first token) and `KEY_SURNAME` (the rest) after
+stripping leading titles (Mr, Dr, Herr, gospa, `g.`, ...), so "Janez" alone later reveals correctly.
+Sub-keys never overwrite an existing entry.
 
-**The node's Placeholder Style always wins.** An ID file passed as Existing Placeholder Map carries
-its own `numbering`; the node ignores it (the extension locks numbering per set instead).
+**Companies.** A found PERSON or LOCATION followed by a legal form (d.o.o., d.d., s.p., GmbH, AG,
+Ltd, Inc., LLC, Corporation, S.p.A., ...) becomes one `[COMPANY_...]`; the same name without the
+form elsewhere in the text is a COMPANY too, with its own ID. Companies get no `_NAME` / `_SURNAME`
+parts. **Own and foreign-minted placeholders** already in the text (`[PERSON_1]`, `[PERSON_a7k2q]`)
+are left alone (`ownPlaceholderTest`, `FOREIGN_MINTED_RE`), and a key the text already spells is
+never minted (`mintedInClear`, here with a word-run lookup). Additionally Protect uses a wider test,
+`extraBlockTest`: it also leaves alone a placeholder minted for **any** entity type code with a
+digit-bearing suffix (`[SOCIAL_HANDLE_1]`, `[IT_FISCAL_CODE_a1b2c]`), where the extension's NUMBER
+rule would cut it into `[SOCIAL_HANDLE_[NUMBER_1]]`. Gateway spans and minting keep the extension's
+`ownPlaceholderTest`; malformed tokens such as `[EMAIL_1x]` are still cut, as in the extension.
+
+**Additionally Protect** (`extraDetect.ts`, option values `NUMBER`, `AMOUNT`, `COMPANY`; local only,
+never sent): NUMBER is every token holding a digit (K101, INV-2024-118, 15.5.2026; side effect: in
+`info@acme2.si` the part `acme2.si`), AMOUNT an amount with €, $, £, EUR, USD, CHF or GBP before or
+after it (4.800,00 EUR, €4.800, CHF 300), COMPANY one to four name words plus a legal suffix
+(Modra Vila d.o.o.). Matchers are atomic: a run is taken whole or not at all. `readExtra` trims and
+upper-cases each value (a list, or comma/space-separated text from an expression); blank, `null` or
+`[]` means off, and anything else (an unknown value, a non-text entry, a number or object) is a
+NodeOperationError naming Additionally Protect, before anything is sent.
+
+**Possible IDs** (`possible.ts`, option `includePossibleIds`, Protect and Detect): in Protect,
+variants of IDs in the set left in clear (company name without its legal form, surname,
+title + surname "Mr. Zupan", Slovene case forms "Luki", "Zupanu" for tokens of 4+ letters) plus the
+gateway's review-only `possible` spans (`detectedValues`, kind `detected`); never replaced; sorted,
+no overlaps, capped at 50 (`possibleIdsTruncated`). Computed only with the option on
+(`findPossible: false` otherwise). Output `{start, end, value, kind, type}` with
+offsets into `protectedText`; the kinds that occur are `company-name`, `surname`, `title-surname`,
+`case-form` and `detected` (the `number` / `amount` / `company` kinds exist in the port but the node
+never passes the extension's typed-after-Protect extras). In Detect, only the gateway's spans:
+`{entityType, start, end}` (+ `value` with Include Values), original-text offsets, never counted in
+`entityCount` / `countsByType`. `"possible": true` is requested only when the option is on **and**
+the verified capabilities list possible types (none in production on 2026-10-21). Wording, from the
+extension: "a prompt to look, not a score". There is no confidence field; do not add one.
 
 ### Accepted map formats (`parsePlaceholderMap`)
 
 One normaliser serves Reveal's Placeholder Map and Protect's Existing Placeholder Map:
 
 - a JSON string of any of the below (a json parameter set by expression may arrive as either);
-- an extension ID file v1, validated with the extension's own parse rules and error sentences;
+- an extension ID file, version 2 or 1, validated with the extension's own rules in the same order
+  (its sentence first, then a detail that never repeats a value; a wrong version gives "Only
+  versions 1 and 2 are supported."). v1 values are trimmed, and values differing only by spaces are
+  duplicates. The result carries `set` (records with type / mine / main, name parts, reveal-only
+  aliases, used, numbering) besides `table` (main values, then name parts, then reveal-only), `used`
+  and `mine`; group members other than the main are only in `set`. A masked file keeps its table;
+  Placeholder Style wins;
 - an array of `{placeholder, value}` (or `{key, value}`; `addedByYou` is honoured);
 - a plain object with bare (`PERSON_a7k2q`) or bracketed (`[PERSON_a7k2q]`) keys;
-- a whole Protect output item (`{ placeholderMap: ... }`), unwrapped. An object with a `format`
-  field is treated as an ID file only when `format` is `anonymizator-id-file` or there is no
-  `placeholderMap` to unwrap, because Include Input Fields can copy an unrelated `format` field
-  (common on file and email items) into a Protect output.
+- a whole Protect output item (`{ placeholderMap, idFile? }`, also only `{ idFile }`), in this
+  order: its nested `idFile` when that parses and **covers** the `placeholderMap` (every map entry
+  reveals the same, every used key is known), because it is lossless (groups, types); else its
+  `placeholderMap`; an `idFile` that does not parse is reported only when there is no
+  `placeholderMap`. Only an object with neither is read by its top-level `format` (an ID file) or
+  as a flat map. The coverage check keeps a stale `idFile` (or top-level ID file fields such as
+  `format` and `ids`, which Include Input Fields can copy from an input file) from winning over the
+  item's newer map. A bare `placeholderMap` holds only each group's main value, so group members
+  from an extension ID file are lost when only it is chained; the README tells users to chain the
+  `idFile` or the whole item.
 
 Every key must pass `isValidKey`: `^[A-Z][A-Za-z0-9_]*$` with at most 9 trailing digits. The digit
 cap is a DoS guard: the extension's sequential counter loops forever on a key like
 `PERSON_99999999999999999999`, which loses integer precision. Empty or whitespace values are
 **tombstones**: they go to `used` (never re-minted) and never into the reveal table, where they
-would erase text. Reversed maps (`{"Janez Novak": "PERSON_x"}`) get a specific error. Error messages
+would erase text. Reversed maps (`{"Janez Novak": "PERSON_x"}`) get a specific error. A bracketed
+value counts as reversed only when the key is not a valid placeholder, or the value looks minted
+(`TYPE_suffix`) and the key does not: `{"Janez": "[PERSON_1]"}` is refused, while an ID written in
+brackets (`"[ACME]"` under `CUSTOM_ab12c`), which Protect itself writes into its map, is accepted. Error messages
 name valid keys and entry positions but **never echo values**, which are the protected data: an
 invalid key is named by its entry number (it may be a real value in a reversed or mangled map), and
 a JSON syntax error reports only the line and column, never V8's own message, which quotes a slice of
 the input for an unexpected token. Insertion order is preserved, because the first key for a value
 wins.
 
-Protect's output `placeholderMap` is the live table plus every retired key (tombstone) with an empty
-value, so a map passed back in as Existing Placeholder Map keeps them retired. The ID file is built
-from the live table only (its `usedPlaceholders` carries the tombstones), because the extension
-refuses blank values.
+Protect's output `placeholderMap` is `revealTable(state)` (each main value with its name parts,
+oldest first, then the reveal-only placeholders) plus every retired key (tombstone) with an empty
+value, so a map passed back in as Existing Placeholder Map keeps them retired; `{}` for masked
+styles. The ID file is built from the set (its `usedPlaceholders` carries the tombstones), because
+the extension refuses blank values. A flat map with one value under two keys converts with the
+`fromV1` rule: the first key protects, the others become reveal-only aliases, so Include ID File no
+longer refuses it. Name parts never lose protection in `fromV1`: a key with `_NAME` / `_SURNAME`
+parts is a PERSON whatever its suffix (`PERSON_CEO`), a part whose person is not a live PERSON
+record (its key became an alias) joins the PERSON record holding that person's value, and a part
+with no such record becomes a PERSON record of its own; only a part whose value a record already
+holds becomes reveal-only.
 
-Values already in the Existing Placeholder Map are matched in the text as exact, Unicode
-word-bounded terms (`pgwSpansFromTable`), so they are replaced even when the gateway does not detect
-them. Keys outside the `TYPE_suffix` shape report as type `CUSTOM`.
+Values already in the set are matched in the text as exact, Unicode word-bounded terms
+(`pgwSpansFromTable`), so they are replaced even when the gateway does not detect them. A record's
+type comes from its key's prefix (`EMAIL` -> `EMAIL_ADDRESS`). In a flat map (`fromV1` only,
+`flatTypeFromKey`) a `TYPE_suffix` key keeps any entity type code as its type, so server-only types
+survive the round trip (`SOCIAL_HANDLE_o1b30` is SOCIAL_HANDLE) and hand-written keys follow the
+same rule (`CASE_1` is CASE, not CUSTOM, a deliberate deviation); a key that does not parse as
+`TYPE_suffix` is `CUSTOM`. ID files carry their types and are unaffected. Protect's `entities` hold only `{entityType, placeholder, start, end,
+score}`, never `value` or `key`.
 
 ### Reveal
 
@@ -522,20 +737,34 @@ that happens to contain brackets does not).
 
 ### ID file interop
 
-With Include ID File, Protect adds `idFile`, a v1 file the extension's **Load IDs** accepts:
-`{format, version: 1, name, numbering, ids: [{value, placeholder: '[KEY]', addedByYou}],
-usedPlaceholders}`. Minted keys and PERSON sub-keys get `addedByYou: false`; keys the user marked as
-their own in an input ID file keep `true`. The extension requires a non-empty `ids` list and unique
-values except PERSON sub-keys of found (not user-added) parents, so the node checks the same rules
-and throws "Include ID File: ..." instead of writing a file the extension would refuse. The tests
-parse files produced by the extension's real `sidepanel/sidepanel-idfile.js` and feed ours to its
-parser and `IdSet.load` rules.
+With Include ID File, Protect adds `idFile`, a **version 2** file the extension's **Load IDs**
+accepts, written exactly like its `anonSerializeIdFile`: `{format: 'anonymizator-id-file',
+version: 2, name, numbering, ids: [{value, placeholder: '[KEY]', type, addedByYou, main?}] (newest
+first), nameParts: [{placeholder, value, of, from}], revealOnly: [{placeholder, value, of}],
+usedPlaceholders}`. Minted records get `addedByYou: false`; records the user marked as their own in
+an input ID file keep `true`. `toIdFile(state)` validates the set with the extension's rules
+(`IdRules.validateSet` and the v2 parser) before returning and throws `PlaceholderMapError`, shown as
+"Include ID File: ...", where the extension would refuse the file. It is written only for **Random and
+Numbers in Order** (never for Type Only or Redacted), whenever the set has records, and still needs
+Include Placeholder Map. With the masked styles excluded and the merge rules below, no input is
+known to reach the "Include ID File: ..." wrapping any more; it stays as a guard but is untested. A v1
+writer (`toIdFileV1`) is kept but not used for output. The interop tests parse files produced by the
+extension's real `sidepanel/sidepanel-idfile.js` (with `lib/id-model.js`) in ours, and feed ours to
+its parser and `IdRules.validateSet`.
 
 ### Share Map Across Items
 
-Off by default. When on, one running map serves every item of the execution, so the same value gets
-the same placeholder in every item. Each item's Existing Placeholder Map is merged into it first; a
-key that already stands for a different value is a `NodeOperationError` for that item. Each item
+Off by default. When on, one running ID set serves every item of the execution, so the same value
+gets the same placeholder in every item. Each item's Existing Placeholder Map (as a whole set:
+records, group members, name parts, reveal-only placeholders, used keys) is merged into it first;
+the same key with the same value is kept once, and a key that already stands for a different value
+is a `NodeOperationError` for that item (nothing is merged then; a reused name-part or reveal-only
+key counts too). `mergeState` applies the `fromV1` rules across items, so the merged set stays one
+the extension would load: a value the shared set already holds under another key keeps that key and
+the incoming key becomes reveal-only for it (its group members and name parts move to that key); a
+live incoming key the shared set has only as reveal-only takes it back (the extension's reclaim);
+a group keeps its shared main value and type; name parts and reveal-only placeholders without a
+live owner are dropped; the incoming `used` keys stay retired. Each item
 outputs the map as it stands after that item, so the last item's map reveals all of them. Items run
 one after another, which makes the shared state safe. When off, every item starts from its own
 Existing Placeholder Map.
@@ -552,71 +781,133 @@ output goes back into the model, and the map holds the real values.
 ### Ignore Terms
 
 Protect and Detect option (`shared/ignoreTerms.ts`). Comma- or newline-separated, or an array from
-an expression, whose entries are taken whole (the only way to give a term containing a comma). A gateway span is dropped when its trimmed text equals a term after NFC normalisation
-and `toLowerCase()` (locale-independent on purpose; `toLocaleLowerCase` would depend on the host).
-Only whole spans are compared. Filtering happens after `analyze` and before `anonymizeFromSpans`, so
-values of the existing or shared map are still replaced by `pgwSpansFromTable`: the map wins.
+an expression, whose entries are taken whole (the only way to give a term containing a comma). A
+value is ignored when its trimmed text equals a term after NFC normalisation and `toLowerCase()`
+(locale-independent on purpose; `toLocaleLowerCase` would depend on the host). Only whole values are
+compared. In Protect the terms become the pipeline's `isSkipped` test (the extension's skipped
+values): it drops gateway spans after companies are typed, Additionally Protect matches and possible
+IDs, while values of the existing or shared set are still replaced by `pgwSpansFromTable`: the map
+wins. In Detect, `filterIgnoredSpans` drops gateway spans and possible IDs.
 
 ### Detect
 
 `actions/detect.ts`. Same `analyze` call as Protect (same credential, same filter, same error
-mapping through `gatewayFailure`), then Ignore Terms, then the same overlap rule as
-`anonymizeFromSpans` (sorted by start, longest first, overlapping spans skipped). Offsets are the
-gateway spans as `toSpans` trimmed them, which index the **original** text in UTF-16 units because of
-`sanitizeForOffsets`. Scores are rounded to two decimals like Protect's. `value` is added only with
+mapping through `gatewayFailure`), then the steps Protect applies to gateway spans, in its order:
+`companySpans` (a PERSON or LOCATION followed by a legal form becomes one COMPANY span including the
+form, and other detected spans with that name become COMPANY too), then Ignore Terms (so an ignored
+"Modra" never hides "Modra d.o.o."), then `nonOverlappingSpans(text, spans)`: the overlap rule of
+`anonymizeFromSpans` (sorted by start, longest first, overlapping spans skipped) with its edge
+trimming (whitespace-only spans dropped). Possible spans are trimmed the same way. Offsets are the
+gateway spans converted to UTF-16 by `codePointSpansToUtf16`, which index the **original** text.
+Types outside the TYPE grammar are reported as `PII` (`pgwEntityType`). No table matches, Additionally
+Protect or local possible IDs. Include Input Fields drops the input's `possibleIds`,
+`possibleIdsTruncated` and `entityFilterIgnored` (`withoutFields`, `DETECT_FIELDS`); Protect also
+drops `idFile` (`PROTECT_FIELDS`). Scores are rounded to two decimals like Protect's. `value` is added only with
 Include Values. Detect never reads `existingPlaceholderMap` (n8n keeps hidden parameter values, so
 a test makes sure a stale one is ignored): it reports gateway findings only. Blank text makes no
 request.
 
-### Entity filter
+### Entity catalog and filter
 
-`entities.ts` holds the extension's 16 toggles with English labels; IBAN expands to
-`IBAN, IBAN_CODE`. Detect = All Types omits the `entities` field, so the server default stays
-authoritative and new server types are picked up without a release. Selecting every type, or none,
-also omits it: the filter fails open to full protection, never to none. `entityTypes` is read only
-when `detect` is `selected`, because n8n keeps values of hidden parameters.
+`entities.ts` ports the extension's `lib/entities.js`: the 16 bundled rows (`ENTITY_CATALOG`, the
+extension's ids, English labels and groups; IBAN sends `IBAN, IBAN_CODE`) and groups (`general`,
+`finance`, `tech`, `si`, `hr`, `at`, `us`), `mergeCatalog` (= `anonMergeCatalog`) and `entityFilter`
+(= `anonEntityFilter`). `entityTypes` is a multiOptions with `loadOptionsMethod: 'getEntityTypes'`:
+the verified capabilities merged with the bundled rows (`null` -> bundled only; no credential
+selected yet -> bundled only without a request, because a failed attempt would hold the bundled list
+for the 5-minute retry interval). Option name = the English label (the type id when the server
+sends none), value = the row id (unchanged, so saved workflows keep working), description = group
+labels and server type codes; sorted by name. A verified document only adds: bundled rows always
+stay and always send their own types; an uncovered server type becomes a server-only row (today
+`IT_FISCAL_CODE`, group `it`, and `SOCIAL_HANDLE`); `possible` types never become rows.
+
+At execution the capabilities are fetched (cached) and the selection is the set of enabled ids:
+Detect = All Types, nothing selected (or only ids that are not TYPE-shaped), or **every bundled row
+selected**, whatever server-only rows exist and whichever of them are selected, omits `entities`,
+so the server default stays authoritative and new server types are picked up without a release
+(fail open to full protection, never to none). A saved "every built-in type" selection therefore
+means All Types with or without a verified document, and a failed capabilities fetch cannot change
+detection. Otherwise the field is **exactly what is selected**: the sorted, unique types of the
+selected bundled rows plus the selected other ids; an unknown but TYPE-shaped id (a server type seen earlier,
+or one given by expression) is sent too, and the gateway's `invalid_entities` retry covers it.
+`entityTypes` is read only when `detect` is `selected`, because n8n keeps values of hidden
+parameters. The `opt_in` default and stored deviations are not ported: a selection in n8n is
+explicit. **Deliberate deviation from `anonEntityFilter`** (n8n stores no explicit "off" for a
+server-only row): with every bundled row selected the node omits the field even when a server-only
+type defaults to `opt_in` (the extension then sends a filter), and a partial selection (say every
+bundled row but URL) sends only the selected types, where the extension also sends the server-only
+types that default to on. The extension-comparison test in `test/entities.test.mjs` carves out
+exactly these cases.
 
 ## Keeping the port in sync with the extension
 
-The engine is a port of the Anonymizator Chrome extension
-(`/Users/greg/Repos/projects/prosecco37/anonymizator-chrome`, remote
-`git.pushin.eu:prosecco-37/anonymizator-chrome`). **`lib/anonymizer.js` there is a byte-for-byte
-mirror of the public CDN copy** (`get.prosecco37.com/pgw/anonymizer.js`, also loaded by the
-anon.prosecco37.com demo), so upstream treats it as frozen and changes it deliberately.
+The engine and the gateway client are a port of the Anonymizator Chrome extension (checkout
+`/home/ubuntu/repos/prosecco37/anonymizator-chrome`, extension files under
+`anonymizator-chrome-ext/`; remote `git.pushin.eu:prosecco-37/anonymizator-chrome`). **`lib/anonymizer.js`
+there is a byte-for-byte mirror of the public CDN copy** (`get.prosecco37.com/pgw/anonymizer.js`,
+also loaded by the anon.prosecco37.com demo), so upstream treats it as frozen and changes it
+deliberately. The gateway side of the contract is `docs/HPKE.md` in the gateway repository
+(`/home/ubuntu/repos/prosecco37/anonymizator`), especially "Client conformance (third-party ports,
+e.g. the n8n node)"; the vectors in `test/fixtures/` are copied byte for byte from its
+`tests/vectors/`.
 
-Ported from extension **0.15.0**, repository HEAD `a4c773b` (2026-10-02). Last upstream commit per
-source file at port time:
+Ported from extension **2026.10.19.1**, repository HEAD `74dc94b` (2026-10-21). The extension's
+history was rewritten on 2026-10-19, so the old `a4c773b` (0.15.0) baseline no longer exists. Last
+upstream commit per source file at port time:
 
 | Extension file | Ported to | Upstream commit |
 | --- | --- | --- |
-| `lib/anonymizer.js` (sha256 `9185d67f...`) | `shared/anonymizer.ts` | `dec40e8` (2026-09-30) |
-| `lib/hpke.js` (sha256 `dfdc3688...`) | `shared/hpke.ts` | `8e64332` (2026-09-26) |
-| `lib/gateway.js` (keyconfig, analyze, status handling) | `shared/gateway.ts`, `shared/keyconfig.ts` | `99d588a` (2026-09-29) |
-| `lib/id-set.js` (`isValidKey`, `mask`, `subKeyParent`, anonymize wrapper) | `shared/anonymizer.ts`, `shared/placeholderMap.ts`, `actions/protect.ts` | `18fa650` (2026-10-02) |
-| `lib/entities.js` | `shared/entities.ts` | `9e3cd50` (2026-09-25) |
-| `sidepanel/sidepanel-idfile.js` | `shared/placeholderMap.ts` | `18fa650` (2026-10-02) |
+| `lib/anonymizer.js` (sha256 `0df5204e...`) | `shared/anonymizer.ts` | `967b3ec` (2026-10-09) |
+| `lib/hpke.js` (sha256 `ee0f1f54...`) | `shared/hpke.ts`, `shared/keyconfig.ts`, `shared/capabilities.ts` | `1c35fbd` (2026-10-09) |
+| `lib/gateway.js` (keyconfig acquisition, analyze, status handling) | `shared/gateway.ts`, `shared/errors.ts` | `3656111` (2026-10-19) |
+| `lib/capabilities.js`, `lib/entities.js` | `shared/gateway.ts` (`fetchCapabilities`, `effectiveMaxTextChars`), `shared/entities.ts` | `3e50316` (2026-10-19) |
+| `lib/id-model.js`, `lib/id-rules.js`, `lib/id-names.js` | `shared/idModel.ts` | `3e50316` (2026-10-19) |
+| `lib/extra-detect.js` | `shared/extraDetect.ts` | `3e50316` (2026-10-19) |
+| `sidepanel/sidepanel-idfile.js` | `shared/placeholderMap.ts` | `3e50316` (2026-10-19) |
+| `lib/id-edits.js`, `lib/id-possible.js`, `lib/messages.js` (Protect handler) | `shared/protectPipeline.ts`, `shared/possible.ts`, `actions/protect.ts` | `3656111` (2026-10-19) |
+| `sidepanel/sidepanel-constants.js` (error wording) | `shared/gatewayMessages.ts` | `fc77565` (2026-10-16) |
+| `lib/constants.js` (`ROOT_KEYCONFIG_PUBKEYS`) | `TRUST_ROOTS_B64URL` in `shared/keyconfig.ts` | `b87ce42` (2026-10-08) |
+
+`lib/id-set.js` (`isValidKey`, `mask`) from the 0.15.0 port is still in `shared/anonymizer.ts`.
 
 To check for drift:
 
 ```
-git -C /Users/greg/Repos/projects/prosecco37/anonymizator-chrome log --oneline a4c773b..HEAD -- \
-  anonymizator-chrome-ext/lib anonymizator-chrome-ext/sidepanel/sidepanel-idfile.js
+git -C /home/ubuntu/repos/prosecco37/anonymizator-chrome log --oneline 74dc94b..HEAD -- \
+  anonymizator-chrome-ext/lib anonymizator-chrome-ext/sidepanel/sidepanel-idfile.js \
+  anonymizator-chrome-ext/sidepanel/sidepanel-constants.js
 npm test   # the differential and interop cases load the extension's current files
 ```
 
+and, for the protocol, `git -C /home/ubuntu/repos/prosecco37/anonymizator log -- docs/HPKE.md
+tests/vectors` (re-copy changed vectors byte for byte).
+
 Port every behavioural change, add the extension's new test cases to `test/`, and update the table
-above. Deliberate differences, none of which change results for valid input, are listed in the header
-of `shared/anonymizer.ts`: `randomInt` instead of a modulo over random bytes, a `Map` for the
-reverse index (so "constructor" never resolves to a prototype member), own-property lookups, and the
-9-digit cap on sequential counters. Not ported: storage, the session queue, the "skipped" list, OIDC
-refresh, the empty-root warning branch, and the extension's `self`/`window` globals.
+above. Deliberate differences are listed in the headers of `shared/anonymizer.ts`,
+`shared/protectPipeline.ts`, `shared/idModel.ts` and `shared/entities.ts`. These change no result
+for valid input: `randomInt` instead of a modulo over random bytes, a `Map` for the reverse index
+(so "constructor" never resolves to a prototype member), own-property lookups, the 9-digit cap on
+sequential counters, a word-run lookup in `revealText` and `mintedInClear`, an `isSkipped`
+predicate instead of the stored skipped/ignored lists, and these performance guards: `revealText`
+skips the `Object.keys` emptiness check (seconds on a 900k-key map), `pgwSpansFromTable` and the
+possible-ID searches skip a value whose first letter/digit run is not a whole run of the text
+before compiling its regex, the possible-ID case-form rule looks words up by stem instead of
+testing every name token, and `anonymizeReserved` tests each ASCII word run on its own with an
+anchored pattern and skips runs longer than 82 characters (the longest mintable key: 64-character
+type, `_`, 9 digits, `_SURNAME`) instead of running the extension's `\b` pattern over the whole
+text, which backtracks quadratically. These do change results, on inputs the extension never meets:
+`fromV1` turning a value under several keys into reveal-only aliases and keeping name parts
+protected, `flatTypeFromKey`, `extraBlockTest`, the `entityFilter` rule above, and the Share Map
+merge rules. Not ported: storage,
+locks, rev/dirty/epoch bookkeeping, the session queue, the side panel, the `opt_in` default and
+stored entity deviations, OIDC refresh, and the extension's `self`/`window` globals.
 
 ## Lint and scanner gotchas
 
 These were all found by hitting real failures. Do not undo them.
 
-- **Local lint is not the gate; the scanner is.** Local `n8n-node lint` uses lint plugin 0.32.1;
-  the scanner (0.38.0) uses 0.35.0. A codex with `"Developer Tools"` passes local lint and fails the
+- **Local lint is not the gate; the scanner is.** Local `n8n-node lint` uses lint plugin 0.35.0;
+  the scanner (0.40.0, checked 2026-10-22) uses 0.37.0. A codex with `"Developer Tools"` passes local lint and fails the
   scanner's `valid-node-categories`. Valid categories: `Data & Storage`, `Finance & Accounting`,
   `Marketing & Content`, `Productivity`, `Miscellaneous`, `Sales`, `Development`, `Analytics`,
   `Communication`, `Utility`. Run `npm run scan` before every release; override the scanner
@@ -625,14 +916,16 @@ These were all found by hitting real failures. Do not undo them.
   makes local lint pass still fails verification. There are none in this repo; keep it that way.
 - **`no-hardcoded-secrets` checks names, not just values.** A constant whose name contains
   `key`, `auth`, `token`, `secret`, `cert`, `password` or similar, holding a 16+ character
-  base64/hex-looking string, fails. `ROOT_PUBLIC_KEY = 'LuE5...'` fails; `TRUST_ROOT_B64URL` passes.
+  base64/hex-looking string, fails. `ROOT_PUBLIC_KEYS = ['lgcs...']` fails; `TRUST_ROOTS_B64URL`
+  passes. A plain string constant trips it too: `KEYCONFIG_HEADER = 'pgw-keyconfig-v2'` failed and is
+  `KC_DOCUMENT_HEADER`.
   The same goes for the DER prefixes (`X25519_SPKI_PREFIX`, `ED25519_SPKI_PREFIX`) and any test
   vector that would ever live under `nodes/`.
 - **Banned globals:** `globalThis`, `global`, `process`, `setTimeout`, `setInterval`,
   `setImmediate` and their `clear*`, `__dirname`, `__filename`. Use `sleep` from `n8n-workflow` for
   the retry pause. `Buffer`, `TextEncoder`, `BigInt` and `URL` are fine. The scanner checks `dist/`
   too.
-- **`require-node-api-error` (scanner plugin 0.35.0) flags any `throw` written lexically inside a
+- **`require-node-api-error` (scanner plugin 0.35.0 and later) flags any `throw` written lexically inside a
   `catch`, in any file under `nodes/`,** unless it throws `NodeApiError` or `NodeOperationError`.
   Helpers record the failure in a variable inside the catch and throw after it (see `send`,
   `sealFor` in `gateway.ts`, and the JSON parse in `placeholderMap.ts`).
@@ -648,6 +941,11 @@ These were all found by hitting real failures. Do not undo them.
 - **The AI tool variant may run without `getNode`.** Every error builds its node through
   `errorNode(this)`, which falls back to a stub descriptor instead of throwing
   "this.getNode is not a function" from inside the error handler.
+- **Dynamic multiOptions have naming rules.** A `loadOptionsMethod` multiOptions must have a
+  display name ending in "Names or IDs" (hence "Entity Type Names or IDs") and a description ending
+  in "Choose from the list, or specify IDs using an
+  <a href=\"https://docs.n8n.io/code/expressions/\">expression</a>." The parameter name and values
+  stay `entityTypes` and the row ids. Return the options sorted by name.
 - **Read collections whole.** `getNodeParameter('options.x')` does not work; read `options` and index
   it, comparing booleans with `=== true`.
 - **The codex is what verification review bounces on.** Since August 2026 the reviews of
@@ -655,7 +953,7 @@ These were all found by hitting real failures. Do not undo them.
   `<package>.<node>`) or an undocumented category (`AI`, `Developer Tools`, `Security`). Both are
   pinned by `test/scaffold.test.mjs`. `alias` is a valid codex field (`CodexData.alias?: string[]`
   in `n8n-workflow`; the scanner accepts it) and only feeds panel search.
-- **Comments must be in English.** Manual review rejected Miravig's submission for non-English
+- **Comments must be in English.** Manual review once rejected Miravig's submission (verified since) for non-English
   inline comments, a rule the scanner does not check. Keep every comment in `nodes/`, `credentials/`,
   `scripts/` and `test/` in English, including in code ported from the extension.
 - **The credential test request needs `disableFollowRedirect: true`** and `responseCode` rules for
@@ -665,7 +963,7 @@ These were all found by hitting real failures. Do not undo them.
 - **Testing the credential over REST needs the stored data.** `POST /rest/credentials/test` with
   `data: {}` reports "API key rejected" for a good key, because n8n only fills in the stored secret
   when the request marks the field as hidden. Fetch the credential with `?includeData=true` first and
-  send that back, as the editor does. On n8n 2.41.7 the endpoint works (judgment's note that it is
+  send that back, as the editor does. On n8n 2.41.7 and 2.44.5 the endpoint works (judgment's note that it is
   broken applies to 2.39.6).
 
 ## Dependencies and the security posture
@@ -693,10 +991,14 @@ imports.
 - Defaults: never put another node's name in a default expression (users rename nodes, and a wrong
   prefilled expression resolves to nothing without an error). Show the usual expressions in `hint`
   or `placeholder` instead, as Reveal does; required fields stay empty so n8n flags them.
-- A new gateway status or error code: add it to `statusError` / `SERVER_CODES` in `gateway.ts`, the
+- A new gateway status or error code: add it to `KNOWN_ERROR_CODES` (plain JSON) or
+  `SEALED_ERROR_CODES` (sealed) in `gateway.ts` only if the extension's lists have it, the
   `GatewayErrorCode` union in `errors.ts`, `GATEWAY_MESSAGES` (and `LOCAL_FAILURES` if decided
-  client-side) in `actions/protect.ts`, and a fake-gateway test in `test/gateway.test.mjs`.
-- A new entity type: add a row to `ENTITY_CATALOG` in the extension's order, then the entities test.
+  client-side) in `shared/gatewayMessages.ts` with the extension's wording, and a fake-gateway test
+  in `test/gateway.test.mjs`.
+- A new entity type usually needs no release: the gateway's signed capabilities add it to the list.
+  Add a bundled row to `ENTITY_CATALOG` only when the extension adds one, in its order, with its
+  label and groups, then the entities test.
 - Error messages are user-facing English: say what happened and how to fix it, avoid the words
   "error", "problem" and "failure", and never include a protected value.
 - Done means: `npm run lint && npm test && npm run scan`, plus `npm run smoke` for anything touching
@@ -710,19 +1012,28 @@ imports.
   `properties` (description or `hint`), the example's README and the submission note.
 - **Reviewer key** for the verification video and review: `TODO(reviewer-key)` in
   `docs/verification-submission.md`.
-- **Submit 0.1.1 or later, never 0.1.0**, once it is staged by CI with provenance and approved.
+- **Submit 0.2.0 or later**, once it is staged by CI with provenance and approved. Never 0.1.0 (no
+  provenance), and not 0.1.1 either: 0.1.x speak only the gateway's protocol v1, which the gateway
+  stops accepting before 2027-02-16 (`docs/HPKE.md` in the gateway repository).
 - **AI tool usage (critique O6), partly resolved.** Include Placeholder Map lets a tool call return
   no real values, Detect returns no values by default, Reveal carries an agent warning, and the
   README has a safe recipe. The tool variant has still only been checked as loaded in e2e, never run
   with an agent; do that before recording the video.
 - **Example canvas screenshot.** The Creator Hub rules want a `canvas.png` beside a community-node
   template; it needs a browser, so the example has none yet. Keep images out of `files`.
-- **Single trust root.** See "Rotating the trust root".
+- **e2e before each release.** The parity branch passed `npm run n8n:reset && npm run e2e` on
+  2026-10-22 (all 19 nodes, `getEntityTypes` with server-only rows); run it again before releasing.
+- **Possible types.** Production lists none (2026-10-21), so the gateway half of Include Possible IDs
+  (`"possible": true`, kind `detected`, Detect's `possibleIds`) has only been tested against the
+  vectors and the fake gateway. Re-run the smoke scenario when the gateway adds some.
+- **Company spans tagged as LOCATION.** The gateway tagged "Modra Vila d.o.o." as LOCATION including
+  the legal form; `companySpans` (like the extension) does not retype it. A server-side or
+  extension-side decision, not a node fix.
 
 ## Positioning: Guardrails and similar community nodes
 
-Researched 2026-10-06 against `@n8n/n8n-nodes-langchain` 2.41.5 and the published packages of
-similar nodes. Facts worth keeping, so docs never overclaim:
+Researched 2026-10-06 and re-checked 2026-10-22 against `@n8n/n8n-nodes-langchain` 2.44.3 (the
+version n8n 2.44.5 ships) and the latest published packages of similar nodes. Facts worth keeping, so docs never overclaim:
 
 - **Guardrails, Sanitize Text** (the overlap a reviewer will ask about): its PII check is 36
   unvalidated regexes (US, UK, ES, IT, PL, SG, AU, IN, FI; no SI/HR/AT IDs) plus custom regex; no
@@ -731,22 +1042,28 @@ similar nodes. Facts worth keeping, so docs never overclaim:
   in its `checks` output. Sanitize sends nothing; the LLM-based checks (jailbreak, NSFW, topical,
   custom) are in Check Text for Violations and use the connected chat model.
 - **Not unique to us**, do not claim them as such: NER or ML detection (doccape, Privent's API mode,
-  several unverified nodes), reversible placeholders with a restore step and offline restore
-  (Privent, rehydra), checksum-validated EMŠO, OIB and Austrian SVNR (Miravig validates all three),
+  PII Guardrails' server, several unverified nodes), heuristic name detection inside n8n (Miravig,
+  eu-pii-redact), reversible numbered placeholders with a map (PII Guardrails, eu-pii-redact,
+  anymize), reversible placeholders with a restore step and offline, credential-free restore
+  (Privent's Local Detokenize, eu-pii-redact, rehydra), checksum-validated EMŠO, OIB and Austrian
+  SVNR (Miravig validates all three; eu-pii-redact covers 21 EU/EEA national IDs),
   a node ported from its own browser extension (Miravig), zero runtime dependencies, provenance,
   `usableAsTool`, returning spans and offsets, a detect-only operation.
-- **Defensible**: HPKE application-layer encryption with a pinned, fail-closed trust root and a
-  ranges-only, stateless gateway (every compared remote node sends plaintext over TLS); local
+- **Defensible**: HPKE application-layer encryption with pinned, fail-closed trust roots (a signed
+  delegation chain to keys with a signed expiry) and a ranges-only, stateless gateway (every compared remote node sends plaintext over TLS); local
   substitution and map; random, non-guessable placeholders; Share Map Across Items and map
-  continuation; `_NAME`/`_SURNAME` entries; `unresolvedPlaceholders`; the extension ID file; a
-  credential-free Reveal; a credential test that tells a bad key from a missing role.
+  continuation; `_NAME`/`_SURNAME` entries; `unresolvedPlaceholders`; the extension ID file and the
+  extension's engine; an entity list from a signed server document; a credential test that tells a
+  bad key from a missing role.
 - Name competitors only in `docs/verification-submission.md`, one neutral sentence each; the README
   compares only with the built-in Guardrails node.
 
 ## Licence
 
 MIT, © 2026 Greg Evseev (`LICENSE.md`). The code ported from the Anonymizator browser extension
-(`anonymizer.js`, `hpke.js`, the gateway logic, `entities.js`, the ID file format) is © 2026
+(`anonymizer.js`, `hpke.js`, the gateway and capabilities logic, `entities.js`, the ID set model and
+rules, the Protect pipeline, Additionally Protect, possible IDs, the error wording, the ID file
+format) is © 2026
 Prosecco 37 d.o.o. and contributed under the MIT licence with permission (decided 2026-10-05).
 `NOTICE` records this and ships in the npm package (`files` lists it). Keep `NOTICE` in step when
 porting more extension code.
@@ -762,8 +1079,10 @@ porting more extension code.
   `dist/template/templates/shared/default/.agents/` (`nodes.md`, `properties.md`, `credentials.md`,
   `versioning.md`).
 - HPKE: RFC 9180 <https://www.rfc-editor.org/rfc/rfc9180>; HKDF: RFC 5869.
-- The extension: its `AGENTS.md`, `BROWSER_EXTENSION_SPEC.md` and `README.md` ("Which placeholders
-  to use"). Gateway wire format and key custody: `docs/HPKE.md` in the privacy-gateway repository.
+- The extension: its `AGENTS.md`, `BROWSER_EXTENSION_SPEC.md` and `README.md` ("Usage", "Which
+  placeholders to use", "How it works"), the reference for behaviour and wording. Gateway wire
+  format, keyconfig, capabilities, errors and key custody: `docs/HPKE.md` in the gateway repository
+  (`/home/ubuntu/repos/prosecco37/anonymizator`), including "Client conformance".
 - The sibling package: `/Users/greg/Repos/projects/cbuctok/n8n-nodes-judgment/AGENTS.md` for the
   verification history this repo follows, `.crush/verification-submission.md` for the submission
   note `docs/verification-submission.md` is modelled on, and

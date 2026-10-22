@@ -27,6 +27,7 @@
  * an example never opens with unknown "?" nodes.
  */
 import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -252,6 +253,36 @@ let credentialId;
 		result?.status === 'OK',
 		'credential test (editor Test button) passes',
 		redact(result).slice(0, 200),
+	);
+}
+
+// --- Entity Types load-options method ------------------------------------------------------
+// The editor fills Entity Types through the node's getEntityTypes method. With the credential it
+// must return the bundled rows plus the server-only types of the verified capabilities document;
+// only the bundled rows means the document did not fetch or verify inside n8n.
+{
+	const { ENTITY_CATALOG } = createRequire(import.meta.url)(
+		resolve(here, '../dist/nodes/Anonymizator/shared/entities.js'),
+	);
+	const bundled = ENTITY_CATALOG.map((row) => row.id);
+	const loaded = await req('/rest/dynamic-node-parameters/options', {
+		method: 'POST',
+		cookie,
+		body: {
+			path: 'parameters.entityTypes',
+			methodName: 'getEntityTypes',
+			nodeTypeAndVersion: { name: NODE_TYPE, version: 1 },
+			currentNodeParameters: { operation: 'protect', detect: 'selected', entityTypes: [] },
+			credentials: { [CREDENTIAL_TYPE]: { id: credentialId, name: CREDENTIAL_NAME } },
+		},
+	});
+	const options = loaded.data?.data ?? loaded.data;
+	const values = Array.isArray(options) ? options.map((o) => o.value) : [];
+	const serverOnly = values.filter((v) => !bundled.includes(v));
+	check(
+		loaded.status === 200 && bundled.every((id) => values.includes(id)) && serverOnly.length > 0,
+		'getEntityTypes returns the bundled rows plus server-only types',
+		`HTTP ${loaded.status}, ${values.length} rows, server-only: ${serverOnly.join(', ') || 'none'}`,
 	);
 }
 

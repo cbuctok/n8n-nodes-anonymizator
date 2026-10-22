@@ -24,42 +24,84 @@ export function errorNode(context: { getNode?: () => unknown }): INode {
 }
 
 /**
- * Failure codes the gateway layer reports. Server codes are passed through verbatim; the rest are
- * produced on the client, mirroring the extension's `lib/gateway.js`.
+ * Failure codes the gateway layer reports, mirroring the extension's `lib/gateway.js`. Server codes
+ * arrive in plain JSON (unauthenticated, so only the allowlisted ones are kept: `KNOWN_ERROR_CODES`
+ * in `gateway.ts`) or sealed in a v2 response (`SEALED_ERROR_CODES`); anything else becomes
+ * `server_error` (5xx) or `http_<status>`. Server text (`detail`, `error_description`) is never kept.
  */
 export type GatewayErrorCode =
-	/** 302 or 401: the API key was rejected (production answers a bad key with a 302). */
+	// --- Credential (plain HTTP status) ---
+	/** 302 (any 3xx) or 401: the API key was rejected (production answers a bad key with a 302). */
 	| 'auth_required'
 	/** 403 `{"error":"missing_role"}`: valid key without access to Anonymizator. */
 	| 'no_access'
-	/** Server: the body was not a sealed frame. */
+	/** Allowlisted BFF code seen with a status other than 401. */
+	| 'unauthenticated'
+	/** Allowlisted BFF code seen with a status other than 403. */
+	| 'missing_role'
+	// --- Gateway, pre-open (plain JSON) ---
+	/** The body was not an `application/octet-stream` frame. */
 	| 'hpke_required'
-	/** Server: the frame could not be opened. */
-	| 'hpke_open_failed'
-	/** Server: unknown key_id (raised only after the single reseal retry also failed). */
-	| 'hpke_unknown_key'
-	/** Server: timestamp outside the accepted window, i.e. the n8n host clock is off. */
+	/** Frame shorter than 61 bytes (or an upload broken inside the frame head). */
+	| 'hpke_bad_frame'
+	/** Frame version not accepted by the gateway. */
+	| 'hpke_bad_version'
+	/** Frame timestamp outside +-60 s of the gateway clock: the n8n host clock is off. */
 	| 'hpke_stale'
-	/** Server (sealed): the entity filter was refused (raised only if the fail-open retry fails). */
+	/** Unknown key_id (raised only after the single retry with a refetched keyconfig). */
+	| 'hpke_unknown_key'
+	/** Key expired on the gateway (raised only after the single retry with a refetched keyconfig). */
+	| 'hpke_key_expired'
+	/** The gateway could not open the frame. */
+	| 'hpke_open_failed'
+	/** The frame was already seen. Never retried. */
+	| 'hpke_replay'
+	/** The gateway has no keys. */
+	| 'hpke_not_configured'
+	/** The gateway's key material is unusable. */
+	| 'hpke_bad_key_material'
+	// --- Gateway, post-open (sealed, or plain JSON from the BFF) ---
+	/** Sealed: the plaintext was not a JSON object. */
+	| 'hpke_bad_payload'
+	/** Sealed: the request object was refused. */
+	| 'invalid_payload'
+	/** Sealed: the entity filter was refused (raised only if the fail-open retry fails too). */
 	| 'invalid_entities'
-	/** Client: keyconfig missing, malformed, wrong suite, bad key length or key_id. */
-	| 'hpke_bad_keyconfig'
-	/** Client: keyconfig signature did not verify against the trust root. Fail closed. */
-	| 'hpke_unverified_keyconfig'
-	/** Client: sealing the request failed. */
-	| 'hpke_seal_failed'
-	/** Client: the response could not be opened or parsed. */
-	| 'hpke_bad_response'
-	/** The server signalled that the text is too large (413 or an equivalent code). */
-	| 'text_too_large'
-	/** 429. Retryable by the user; no automatic loop. */
+	/** Text over the limit: refused locally before sending, sealed, or a 413 from the BFF. */
+	| 'payload_too_large'
+	/** Sealed: the gateway hit an internal fault (logged there without content). */
+	| 'internal_error'
+	// --- BFF / edge (plain JSON) ---
+	/** 429 (BFF limits or Traefik's in-flight cap). `retryAfter` carries Retry-After. */
 	| 'rate_limited'
-	/** 5xx after the single retry. */
+	/** 503: no slot or the replay cache is full. */
+	| 'busy'
+	/** 502 from the BFF. */
+	| 'upstream_unavailable'
+	/** 504 from the BFF. */
+	| 'upstream_timeout'
+	// --- Decided in n8n ---
+	/** Keyconfig v2 missing, malformed, not signed by a pinned root, or below the serial floor. */
+	| 'hpke_unverified_keyconfig'
+	/** Keyconfig v2 (delegation or document) outside its time window by the n8n host clock. */
+	| 'hpke_stale_keyconfig'
+	/** The verified keyconfig lists no key valid for long enough. */
+	| 'hpke_no_usable_key'
+	/** Sealing the request failed. */
+	| 'hpke_seal_failed'
+	/** The response could not be opened, parsed or classified, or a span lies outside the text. */
+	| 'hpke_bad_response'
+	/** 5xx without an allowlisted code. */
 	| 'server_error'
 	/** The request timed out. */
 	| 'timeout'
 	/** The request never reached the gateway (DNS, connection refused, TLS...). */
 	| 'offline'
+	// --- Legacy (protocol v1 era; no longer produced, kept so old mappings still compile) ---
+	/** Replaced by `payload_too_large`. */
+	| 'text_too_large'
+	/** Replaced by `hpke_unverified_keyconfig` (the v2 path has no separate structural code). */
+	| 'hpke_bad_keyconfig'
 	/** Any other status, e.g. `http_404`. */
 	| `http_${number}`;
 
@@ -77,15 +119,28 @@ export class GatewayError extends Error {
 	/** HTTP status when there was a response, otherwise undefined. */
 	readonly httpCode?: number;
 
-	/** Optional server-provided detail (e.g. the sealed error's `detail`). */
+	/**
+	 * Optional client-side detail. Never server text: plain-JSON `detail` / `error_description` is
+	 * unauthenticated and sealed errors carry none.
+	 */
 	readonly detail?: string;
 
-	constructor(code: GatewayErrorCode, message: string, httpCode?: number, detail?: string) {
+	/** Seconds from a 429's Retry-After, when it is an integer in [1, 300]. */
+	readonly retryAfter?: number;
+
+	constructor(
+		code: GatewayErrorCode,
+		message: string,
+		httpCode?: number,
+		detail?: string,
+		retryAfter?: number,
+	) {
 		super(message);
 		this.name = 'GatewayError';
 		this.code = code;
 		this.httpCode = httpCode;
 		this.detail = detail;
+		this.retryAfter = retryAfter;
 	}
 }
 

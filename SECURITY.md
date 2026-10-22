@@ -17,8 +17,11 @@ In scope is everything in this repository and the published `n8n-nodes-anonymiza
 particular:
 
 - the HPKE encryption of requests and responses (`nodes/Anonymizator/shared/hpke.ts`);
-- the key configuration check: the pinned trust root, the signature verification and its fail-closed
-  behaviour (`shared/keyconfig.ts`, `shared/gateway.ts`);
+- the key configuration check: the pinned trust roots, the delegation and key configuration
+  signatures, key expiry and selection, the delegation serial floor, and the fail-closed behaviour
+  (`shared/keyconfig.ts`, `shared/gateway.ts`);
+- the capabilities check: its signature verification, and the rule that a capabilities document can
+  only add entity types, never remove protection (`shared/capabilities.ts`, `shared/entities.ts`);
 - anything that could send personal data, a placeholder map or an API key somewhere it should not
   go, or put a protected value into an error message or log;
 - placeholder map and ID file parsing, and Reveal.
