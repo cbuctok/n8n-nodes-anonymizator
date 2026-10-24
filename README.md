@@ -518,7 +518,7 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
-- **Unreleased:** **Protect** and **Detect** split a text longer than the gateway's per-request
+- **0.3.0** (2026-10-24): **Protect** and **Detect** split a text longer than the gateway's per-request
   limit into parts and analyse them one after another, so there is no length limit per item any
   more; the node is the reference for API callers ([Long texts](#long-texts-how-the-node-splits-them)).
 - **0.2.0** (2026-10-22): brought in line with the Anonymizator browser extension 2026.10.19.1: the

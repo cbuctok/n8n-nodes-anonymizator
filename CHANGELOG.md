@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-10-24
 
 The hosted gateway now accepts at most 14,000 characters per request, so that every request finishes
 within its time budget; clients split longer texts. This node now does, in the same way as the
