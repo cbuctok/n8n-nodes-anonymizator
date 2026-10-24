@@ -417,9 +417,9 @@ describe('Protect (fake analyze)', () => {
 		assert.deepEqual(analyzeCalls[0].entityTypes, ['NEW_TYPE', 'PERSON']);
 	});
 
-	test('the text cap comes from the verified capabilities', async () => {
+	test('the per-request cap comes from the verified capabilities', async () => {
 		await run({ params: protectParams() });
-		assert.equal(analyzeCalls[0].options.maxTextChars, 120000, 'bundled cap without a document');
+		assert.equal(analyzeCalls[0].options.maxTextChars, 10000, 'bundled cap without a document');
 		fakeCapabilities = { ...makeCapabilities(), maxTextChars: 50000, maxBodyBytes: 2097152 };
 		await run({ params: protectParams() });
 		assert.equal(analyzeCalls[1].options.maxTextChars, 50000);
@@ -1294,15 +1294,27 @@ describe('gateway failures (fake analyze)', () => {
 		});
 	}
 
-	test('a text over the cap is refused locally, with the cap from the capabilities', async () => {
+	test('payload_too_large names no limit and no advice to split items', async () => {
 		fakeCapabilities = { ...makeCapabilities(), maxTextChars: 50000 };
-		// What gateway.analyze throws before sending anything (no HTTP status).
+		// The local per-request guard (no HTTP status): the node never sends a part over the cap.
 		analyzeBehaviour.throw = new GatewayError('payload_too_large', 'raw');
 		const error = await runError({ params: protectParams() });
 		assert.ok(error instanceof NodeOperationError);
-		assert.match(error.message, /too long/);
-		assert.match(error.description, /50,000 characters/);
-		assert.match(error.description, /Split the text/);
+		assert.match(error.message, /too long for one request/);
+		assert.doesNotMatch(error.description, /[0-9],[0-9]{3}|Split the text/);
+	});
+
+	test('a failed part of a long text is named in the description, before the code', async () => {
+		const failure = new GatewayError('busy', 'raw', 503);
+		failure.failedPart = 2;
+		failure.parts = 5;
+		analyzeBehaviour.throw = failure;
+		const error = await runError({ params: protectParams() });
+		assert.ok(error instanceof NodeApiError);
+		assert.match(
+			error.description,
+			/This was part 2 of 5 of the text; no partial result is output\. \(code: busy\)$/,
+		);
 	});
 
 	test('continueOnFail turns the failure into an error item and keeps going', async () => {
@@ -1792,6 +1804,154 @@ describe('full stack (real gateway.ts, fake HPKE recipient)', () => {
 
 // ---------------------------------------------------------------------------------------------
 // Review findings (actions cluster): each test reproduces one confirmed scenario.
+
+describe('long texts in parts (real gateway.ts, fake HPKE recipient)', () => {
+	const root = Object.assign(ed25519Signer(), { delegated: ed25519Signer() });
+	const seams = { trustRootsB64url: [root.publicKey], retryDelayMs: 1 };
+	const codePoints = (s) => [...s].length;
+	const posts = (fake) => fake.requests.filter((r) => r.method === 'POST');
+
+	beforeEach(() => {
+		gateway.analyze = (ctx, text, entityTypes, options) =>
+			realAnalyze(ctx, text, entityTypes, { ...options, ...seams });
+		gateway.fetchCapabilities = (ctx) => realFetchCapabilities(ctx, seams);
+		gateway.clearGatewayCaches();
+	});
+
+	// About 39 000 code points: five parts of at most 8 000 (no capabilities: the bundled cap).
+	const UNIT = '🎉 Janez Novak piše z ana.kovac@example.com, Žiga 👍🏽 čaka.\n';
+	const LONG = UNIT.repeat(700);
+
+	test('Protect: a long item is split, merged, and gets one placeholder per value', async () => {
+		const seen = [];
+		const fake = makeGateway({
+			root,
+			analyzeHandler: (opened) => {
+				seen.push(opened.payload.text);
+				const t = opened.payload.text;
+				return octet(200, opened.seal({ entities: toCodePoints(t, detect(t)) }));
+			},
+		});
+		const [item] = await runFull({ params: protectParams({ text: LONG }), http: fake.http });
+		assert.ok(seen.length >= 5, `${seen.length} parts`);
+		assert.ok(seen.every((t) => codePoints(t) <= 8000));
+		for (const t of seen.slice(0, -1)) assert.ok(t.endsWith('\n'), 'cut after a line');
+		const map = item.json.placeholderMap;
+		// One placeholder per value (plus the PERSON's _NAME / _SURNAME parts).
+		assert.deepEqual(Object.values(map).sort(), [
+			'Janez',
+			'Janez Novak',
+			'Novak',
+			'ana.kovac@example.com',
+		]);
+		const person = keyFor(map, 'Janez Novak');
+		const email = keyFor(map, 'ana.kovac@example.com');
+		assert.equal(
+			item.json.protectedText,
+			UNIT.replace('Janez Novak', `[${person}]`)
+				.replace('ana.kovac@example.com', `[${email}]`)
+				.repeat(700),
+		);
+		assert.equal(item.json.entities.length, 1400);
+		for (const e of item.json.entities) {
+			assert.equal(
+				item.json.protectedText.slice(e.start, e.end),
+				`[${e.placeholder.replace(/^\[|\]$/g, '')}]`,
+			);
+		}
+		const [revealed] = await runFull({
+			params: revealParams(item.json.protectedText, item.json.placeholderMap),
+		});
+		assert.equal(revealed.json.revealedText, LONG);
+	});
+
+	test('Protect: a value straddling a hard cut after emoji is protected whole', async () => {
+		const NAME = 'ALICESMITH';
+		const fake = makeGateway({
+			root,
+			analyzeHandler: (opened) => {
+				const t = opened.payload.text;
+				const entities = [];
+				for (let at = t.indexOf(NAME); at !== -1; at = t.indexOf(NAME, at + NAME.length)) {
+					const start = codePoints(t.slice(0, at));
+					entities.push({ entity_type: 'PERSON', start, end: start + NAME.length, score: 0.9 });
+				}
+				for (let k = NAME.length - 1; k >= 2; k--) {
+					if (t.endsWith(NAME.slice(0, k))) {
+						const end = codePoints(t);
+						entities.push({ entity_type: 'PERSON', start: end - k, end, score: 0.9 });
+						break;
+					}
+				}
+				return octet(200, opened.seal({ entities }));
+			},
+		});
+		const text = '😀'.repeat(7996) + NAME + '😀'.repeat(500);
+		const [item] = await runFull({ params: protectParams({ text }), http: fake.http });
+		assert.equal(posts(fake).length, 2);
+		const key = keyFor(item.json.placeholderMap, NAME);
+		assert.ok(key);
+		assert.equal(item.json.protectedText, `${'😀'.repeat(7996)}[${key}]${'😀'.repeat(500)}`);
+		assert.doesNotMatch(item.json.protectedText, /ALIC|SMITH/);
+		const [e] = item.json.entities;
+		assert.equal(e.start, 7996 * 2);
+		assert.equal(item.json.protectedText.slice(e.start, e.end), `[${key}]`);
+	});
+
+	test('Detect: offsets of every part index the original text', async () => {
+		const fake = makeGateway({ root });
+		const [item] = await runFull({
+			params: { operation: 'detect', text: LONG, options: { includeValues: true } },
+			http: fake.http,
+		});
+		assert.ok(posts(fake).length >= 5);
+		assert.equal(item.json.entityCount, 1400);
+		for (const e of item.json.entities) assert.equal(LONG.slice(e.start, e.end), e.value);
+		assert.equal(item.json.entities.at(-1).value, 'ana.kovac@example.com');
+	});
+
+	test('no up-front refusal: 120 001 characters are protected in parts', async () => {
+		const fake = makeGateway({ root });
+		const text = `${'a'.repeat(120000)} Janez Novak`.slice(0, 120001);
+		const [item] = await runFull({ params: protectParams({ text }), http: fake.http });
+		assert.equal(item.json.protectedText.length, 120001);
+		assert.equal(posts(fake).length, 16);
+	});
+
+	test('one failing part fails the item: no partial output, later parts never sent', async () => {
+		let n = 0;
+		const fake = makeGateway({
+			root,
+			analyzeHandler: (opened) => {
+				n += 1;
+				if (n >= 2) return json(500, { error: 'internal_error' });
+				const t = opened.payload.text;
+				return octet(200, opened.seal({ entities: toCodePoints(t, detect(t)) }));
+			},
+		});
+		const error = await runFullError({ params: protectParams({ text: LONG }), http: fake.http });
+		assert.ok(error instanceof NodeApiError);
+		assert.match(error.message, /could not process the text/);
+		assert.match(
+			error.description,
+			/This was part 2 of \d+ of the text; no partial result is output\./,
+		);
+		assert.match(error.description, /\(code: internal_error\)$/);
+		assert.equal(posts(fake).length, 3, 'part 1, part 2 twice (the 5xx retry)');
+
+		gateway.clearGatewayCaches();
+		n = 0;
+		const out = await runFull({
+			items: [{ text: LONG }],
+			params: protectParams({ text: LONG }),
+			http: fake.http,
+			continueOnFail: true,
+		});
+		assert.equal(out.length, 1);
+		assert.deepEqual(Object.keys(out[0].json), ['error']);
+		assert.doesNotMatch(JSON.stringify(out), /Janez|ana\.kovac|PERSON_|EMAIL_/);
+	});
+});
 
 describe('review fixes: ID files, shared maps, stale input fields (fake analyze)', () => {
 	beforeEach(installFakeAnalyze);

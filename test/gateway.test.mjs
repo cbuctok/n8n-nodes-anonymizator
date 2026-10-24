@@ -223,7 +223,7 @@ describe('analyze: request', () => {
 		);
 		const [post] = gw.posts();
 		assert.equal(post.headers.Accept, 'application/octet-stream, application/json');
-		assert.equal(post.timeout, 30000);
+		assert.equal(post.timeout, 60000);
 		assert.equal(post.json, false);
 		const [get] = gw.gets('/v1/keyconfig');
 		assert.equal(get.headers.Accept, 'application/json');
@@ -255,24 +255,16 @@ describe('analyze: request', () => {
 		assert.deepEqual(result, { spans: [], possible: [], entityFilterIgnored: false });
 	});
 
-	it('text over the cap: payload_too_large before anything is sent', async () => {
+	it('refuses no text up front: 120 001 characters go out in parts of at most 8 000', async () => {
 		const { gw, options } = setup();
-		const error = await rejects(
-			G.analyze(gw.ctx, 'a'.repeat(120001), undefined, options),
-			'payload_too_large',
-		);
-		assert.equal(error.httpCode, undefined);
-		assert.match(error.message, /too long/);
-		await rejects(
-			G.analyze(gw.ctx, 'a'.repeat(50001), undefined, { ...options, maxTextChars: 50000 }),
-			'payload_too_large',
-		);
-		assert.equal(gw.requests.length, 0);
-		await G.analyze(gw.ctx, 'a'.repeat(120000), undefined, options);
-		assert.equal(gw.posts().length, 1);
+		const result = await G.analyze(gw.ctx, 'a'.repeat(120001), undefined, options);
+		assert.deepEqual(result, { spans: [], possible: [], entityFilterIgnored: false });
+		assert.equal(gw.posts().length, 16);
+		assert.ok(gw.opened.every((o) => o.payload.text.length <= 8000));
+		assert.equal(gw.opened.map((o) => o.payload.text).join('').length >= 120001, true);
 	});
 
-	it('a payload_too_large from the BFF or the gateway names no limit the text already passed', async () => {
+	it('a payload_too_large from the BFF or the gateway names no limit', async () => {
 		for (const response of [
 			() => json(413, { error: 'payload_too_large' }),
 			(opened) => octet(200, opened.seal({ error: 'payload_too_large' })),
@@ -284,28 +276,242 @@ describe('analyze: request', () => {
 				'payload_too_large',
 			);
 			assert.ok(error.httpCode);
-			assert.match(error.message, /too long/);
-			// What the node shows (protect.ts gatewayFailure gets the local cap as well).
-			const shown = gatewayFailure(gw.ctx, error, 0, 50000);
+			assert.equal(error.failedPart, undefined, 'a one-part text names no part');
+			assert.match(error.message, /too long for one request/);
+			// What the node shows.
+			const shown = gatewayFailure(gw.ctx, error, 0);
 			assert.match(shown.message, /too long/);
-			assert.doesNotMatch(`${shown.message} ${shown.description}`, /50,000|120,000/);
+			assert.doesNotMatch(`${shown.message} ${shown.description}`, /50,000|120,000|10,000/);
+			assert.doesNotMatch(shown.description, /Split the text/);
 		}
-		// The local refusal names the limit that applied.
-		const { gw, options } = setup();
-		const local = await rejects(
-			G.analyze(gw.ctx, 'a'.repeat(50001), undefined, { ...options, maxTextChars: 50000 }),
-			'payload_too_large',
-		);
-		assert.match(gatewayFailure(gw.ctx, local, 0, 50000).description, /50,000 characters/);
-	});
-
-	it('concurrent analyses share one keyconfig fetch', async () => {
-		const { gw, options } = setup();
-		await Promise.all([1, 2, 3].map((i) => G.analyze(gw.ctx, `t${i}`, undefined, options)));
-		assert.equal(gw.gets('/v1/keyconfig').length, 1);
-		assert.equal(gw.posts().length, 3);
 	});
 });
+
+// ---------------------------------------------------------------------------------------------
+
+describe('analyze: long texts in parts (chunker)', () => {
+	const T = 8000; // the bundled cap 10 000 - 2 000
+	const codePoints = (s) => [...s].length;
+
+	// A detector that also reports the cut-off head of NAME at the very end of a part, like a model
+	// that sees "ALIC" at the edge (offsets in code points, as the gateway answers).
+	const NAME = 'ALICESMITH';
+	function edgeDetector(opened) {
+		const text = opened.payload.text;
+		const entities = [];
+		for (let at = text.indexOf(NAME); at !== -1; at = text.indexOf(NAME, at + NAME.length)) {
+			const start = codePoints(text.slice(0, at));
+			entities.push({ entity_type: 'PERSON', start, end: start + NAME.length, score: 0.9 });
+		}
+		for (let k = NAME.length - 1; k >= 2; k--) {
+			if (text.endsWith(NAME.slice(0, k))) {
+				const end = codePoints(text);
+				entities.push({ entity_type: 'PERSON', start: end - k, end, score: 0.9 });
+				break;
+			}
+		}
+		return octet(200, opened.seal({ entities }));
+	}
+	const spansDetector = (opened) =>
+		octet(200, opened.seal({ entities: spansOf(opened.payload.text) }));
+
+	it('a text of exactly the part target is one request, one more character two', async () => {
+		const { gw, options } = setup();
+		await G.analyze(gw.ctx, 'a'.repeat(T), undefined, options);
+		assert.deepEqual(
+			gw.opened.map((o) => o.payload.text.length),
+			[T],
+		);
+		G.clearGatewayCaches();
+		const second = setup();
+		await G.analyze(second.gw.ctx, 'a'.repeat(T + 1), undefined, second.options);
+		assert.equal(second.gw.posts().length, 2);
+	});
+
+	it('the part size follows the per-request cap: 14 000 (the hosted cap) gives parts of 12 000', async () => {
+		const { gw, options } = setup();
+		const text = 'Janez Novak signs.\n'.repeat(2500); // 47 500 characters
+		await G.analyze(gw.ctx, text, undefined, { ...options, maxTextChars: 14000 });
+		assert.equal(gw.posts().length, 4);
+		assert.ok(gw.opened.every((o) => codePoints(o.payload.text) <= 12000));
+		for (const o of gw.opened.slice(0, -1)) assert.ok(o.payload.text.endsWith('\n'));
+		assert.equal(gw.opened.map((o) => o.payload.text).join(''), text, 'cut at lines: no overlap');
+	});
+
+	it('parts are measured in code points, not UTF-16 units', async () => {
+		const { gw, options } = setup();
+		// 9 000 emoji: 9 000 code points (two parts of at most 8 000), 18 000 UTF-16 units.
+		await G.analyze(gw.ctx, '😀'.repeat(9000), undefined, options);
+		assert.deepEqual(
+			gw.opened.map((o) => codePoints(o.payload.text)),
+			[T, 9000 - T + 256],
+		);
+	});
+
+	it('every part is sealed afresh and carries the same filter and possible flag', async () => {
+		const { gw, options } = setup();
+		const text = 'Janez Novak signs.\n'.repeat(1200); // 22 800 characters: three parts
+		await G.analyze(gw.ctx, text, ['PERSON'], { ...options, possible: true });
+		assert.equal(gw.posts().length, 3);
+		const frames = new Set(gw.posts().map((p) => p.body.subarray(13, 45).toString('hex')));
+		assert.equal(frames.size, 3, 'a fresh ephemeral key per request');
+		for (const o of gw.opened) {
+			assert.deepEqual(o.payload.entities, ['PERSON']);
+			assert.equal(o.payload.possible, true);
+		}
+	});
+
+	it('a value straddling a hard cut after emoji is one span at UTF-16 offsets', async () => {
+		const { gw, options } = setup({ analyze: edgeDetector });
+		// Code points: T - 4 emoji, then NAME across the cut at T (no whitespace: a hard cut).
+		const text = '😀'.repeat(T - 4) + NAME + '😀'.repeat(500);
+		const result = await G.analyze(gw.ctx, text, undefined, options);
+		assert.equal(gw.posts().length, 2);
+		assert.ok(gw.opened[0].payload.text.endsWith('ALIC'), 'the first part saw only its head');
+		assert.ok(gw.opened.every((o) => codePoints(o.payload.text) <= T));
+		assert.equal(result.spans.length, 1);
+		const [span] = result.spans;
+		assert.equal(text.slice(span.start, span.end), NAME);
+		assert.equal(span.start, (T - 4) * 2);
+	});
+
+	it('spans of every part land at absolute offsets: emoji, accents, sorted', async () => {
+		const { gw, options } = setup({ analyze: spansDetector });
+		const unit = '🎉 Pozdrav, Janez Novak piše ana.kovac@example.com. Ana Kovač 👍🏽 čaka.\n';
+		const text = unit.repeat(500); // ~36 000 code points, five parts
+		const result = await G.analyze(gw.ctx, text, undefined, options);
+		assert.ok(gw.posts().length >= 4);
+		assert.ok(gw.opened.every((o) => codePoints(o.payload.text) <= T));
+		assert.equal(result.spans.length, 1500);
+		const values = new Set(result.spans.map((s) => text.slice(s.start, s.end)));
+		assert.deepEqual([...values].sort(), ['Ana Kovač', 'Janez Novak', 'ana.kovac@example.com']);
+		for (let i = 1; i < result.spans.length; i++) {
+			assert.ok(result.spans[i].start >= result.spans[i - 1].end, 'sorted, no overlaps');
+		}
+	});
+
+	it('possible spans of later parts are rebased too and dropped where they touch an entity', async () => {
+		const { gw, options } = setup({
+			analyze: (opened) => {
+				const text = opened.payload.text;
+				const entities = spansOf(text);
+				const possible = [];
+				for (const m of text.matchAll(/Kovač|Pozdrav/gu)) {
+					const start = codePoints(text.slice(0, m.index));
+					possible.push({ entity_type: 'ORGANIZATION', start, end: start + codePoints(m[0]) });
+				}
+				return octet(200, opened.seal({ entities, possible }));
+			},
+		});
+		const text = '😀 Pozdrav, Ana Kovač.\n'.repeat(1000);
+		const result = await G.analyze(gw.ctx, text, undefined, { ...options, possible: true });
+		assert.ok(gw.posts().length >= 3);
+		assert.equal(result.possible.length, 1000, 'only the free-standing "Pozdrav" spans remain');
+		for (const p of result.possible) assert.equal(text.slice(p.start, p.end), 'Pozdrav');
+	});
+
+	it('one failing part fails the whole text: part named, later parts never sent', async () => {
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt) =>
+				attempt >= 2
+					? json(500, { error: 'internal_error' })
+					: octet(200, opened.seal({ entities: [] })),
+		});
+		const text = 'Janez Novak signs.\n'.repeat(1200); // three parts
+		const error = await rejects(G.analyze(gw.ctx, text, undefined, options), 'internal_error');
+		assert.equal(error.failedPart, 2);
+		assert.equal(error.parts, 3);
+		assert.equal(gw.posts().length, 3, 'part 1, part 2 twice (the 5xx retry), never part 3');
+		const shown = gatewayFailure(gw.ctx, error, 0);
+		assert.match(
+			shown.description,
+			/This was part 2 of 3 of the text; no partial result is output\. \(code: internal_error\)$/,
+		);
+	});
+
+	it('a bad span in the last part fails the text closed (hpke_bad_response)', async () => {
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt) =>
+				octet(
+					200,
+					opened.seal({
+						entities: attempt === 3 ? [{ entity_type: 'PERSON', start: 0, end: 10 ** 6 }] : [],
+					}),
+				),
+		});
+		const text = 'Janez Novak signs.\n'.repeat(1200);
+		const error = await rejects(G.analyze(gw.ctx, text, undefined, options), 'hpke_bad_response');
+		assert.deepEqual([error.failedPart, error.parts], [3, 3]);
+	});
+
+	it('a rate limit in a multi-part text is waited out (Retry-After), then the part is sent again', async () => {
+		let limited = 0;
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt) =>
+				attempt === 2 && ++limited
+					? {
+							...json(429, { error: 'rate_limited' }),
+							headers: { 'content-type': 'application/json', 'retry-after': '7' },
+						}
+					: octet(200, opened.seal({ entities: [] })),
+		});
+		const started = Date.now();
+		const text = 'Janez Novak signs.\n'.repeat(1200);
+		const result = await G.analyze(gw.ctx, text, undefined, { ...options, retryAfterSecondMs: 5 });
+		assert.deepEqual(result.spans, []);
+		assert.ok(Date.now() - started >= 35, 'waited 7 x 5 ms');
+		assert.equal(gw.posts().length, 4);
+		assert.equal(gw.opened[1].payload.text, gw.opened[2].payload.text);
+	});
+
+	it('rate limits: a one-part text fails at once; a part gives up after 3 waits or a wait over 60 s', async () => {
+		const limited = (retryAfter) => () => ({
+			...json(429, { error: 'rate_limited' }),
+			headers: { 'content-type': 'application/json', 'retry-after': String(retryAfter) },
+		});
+		let { gw, options } = setup({ analyze: limited(7) });
+		const one = await rejects(G.analyze(gw.ctx, 'Janez', undefined, options), 'rate_limited');
+		assert.equal(one.retryAfter, 7);
+		assert.equal(gw.posts().length, 1);
+
+		G.clearGatewayCaches();
+		({ gw, options } = setup({ analyze: limited(1) }));
+		const text = 'Janez Novak signs.\n'.repeat(1200);
+		const tired = await rejects(
+			G.analyze(gw.ctx, text, undefined, { ...options, retryAfterSecondMs: 1 }),
+			'rate_limited',
+		);
+		assert.deepEqual([tired.failedPart, tired.parts], [1, 3]);
+		assert.equal(gw.posts().length, 4, 'the first try and 3 waits');
+
+		G.clearGatewayCaches();
+		({ gw, options } = setup({ analyze: limited(61) }));
+		await rejects(
+			G.analyze(gw.ctx, text, undefined, { ...options, retryAfterSecondMs: 1 }),
+			'rate_limited',
+		);
+		assert.equal(gw.posts().length, 1, 'a wait over 60 s is not waited out');
+	});
+
+	it('invalid_entities falls open once for the whole text, from the first part', async () => {
+		const { gw, options } = setup({
+			analyze: (opened, request, attempt) =>
+				opened.payload.entities !== undefined && attempt === 2
+					? octet(200, opened.seal({ error: 'invalid_entities' }))
+					: octet(200, opened.seal({ entities: spansOf(opened.payload.text) })),
+		});
+		const text = 'Janez Novak signs.\n'.repeat(1200);
+		const result = await G.analyze(gw.ctx, text, ['PERSON'], options);
+		assert.equal(result.entityFilterIgnored, true);
+		assert.equal(gw.posts().length, 5, 'parts 1 and 2 with the filter, then all three without');
+		assert.deepEqual(gw.opened[0].payload.entities, ['PERSON']);
+		assert.ok(gw.opened.slice(2).every((o) => !('entities' in o.payload)));
+		assert.equal(gw.opened[2].payload.text, gw.opened[0].payload.text);
+		assert.equal(result.spans.length, 1200, 'only the second run counts');
+	});
+});
+
+// ---------------------------------------------------------------------------------------------
 
 describe('analyze: response validation (fail closed)', () => {
 	const cases = [
@@ -1217,19 +1423,34 @@ describe('gatewayMessages', () => {
 		]);
 	});
 
-	it('a server payload_too_large does not claim the local limit', () => {
-		for (const httpCode of [413, 200]) {
-			const text = M.gatewayErrorText('payload_too_large', { maxTextChars: 120000, httpCode });
-			assert.match(text.message, /too long/);
-			assert.doesNotMatch(text.description, /[0-9]/, String(httpCode));
+	it('payload_too_large names no limit: there is none per item, only per request', () => {
+		for (const extra of [{ httpCode: 413 }, { httpCode: 200 }, undefined]) {
+			const text = M.gatewayErrorText('payload_too_large', extra);
+			assert.match(text.message, /too long for one request/);
+			assert.match(text.description, /splits long texts into parts/);
+			assert.doesNotMatch(`${text.message} ${text.description}`, /[0-9]{2,}|[0-9],[0-9]/);
+			assert.doesNotMatch(text.description, /Split the text into smaller items/);
 		}
-		assert.match(
-			M.gatewayErrorText('payload_too_large', { maxTextChars: 80000 }).description,
-			/80,000 characters/,
-		);
 	});
 
-	it('gatewayErrorText adds Retry-After, the limit, and a fixed sentence for http_<status>', () => {
+	it('failedPartText names the part of a multi-part text, numbers only', () => {
+		assert.equal(
+			M.failedPartText(2, 3),
+			'This was part 2 of 3 of the text; no partial result is output.',
+		);
+		for (const [part, parts] of [
+			[undefined, undefined],
+			[1, 1],
+			[0, 3],
+			[4, 3],
+			[1.5, 3],
+			['2', '3'],
+		]) {
+			assert.equal(M.failedPartText(part, parts), '', `${part}/${parts}`);
+		}
+	});
+
+	it('gatewayErrorText adds Retry-After and a fixed sentence for http_<status>', () => {
 		assert.match(
 			M.gatewayErrorText('rate_limited', { retryAfter: 12 }).description,
 			/Try again in 12 s\.$/,
@@ -1237,11 +1458,6 @@ describe('gatewayMessages', () => {
 		assert.doesNotMatch(
 			M.gatewayErrorText('rate_limited', { retryAfter: 900 }).description,
 			/in 900 s/,
-		);
-		assert.match(M.gatewayErrorText('payload_too_large').description, /120,000 characters/);
-		assert.match(
-			M.gatewayErrorText('payload_too_large', { maxTextChars: 50000 }).description,
-			/50,000 characters/,
 		);
 		assert.deepEqual(M.gatewayErrorText('http_404', { httpCode: 404 }), {
 			message: 'The Anonymizator gateway answered with an unexpected status (HTTP 404)',

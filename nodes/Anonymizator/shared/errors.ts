@@ -67,7 +67,7 @@ export type GatewayErrorCode =
 	| 'invalid_payload'
 	/** Sealed: the entity filter was refused (raised only if the fail-open retry fails too). */
 	| 'invalid_entities'
-	/** Text over the limit: refused locally before sending, sealed, or a 413 from the BFF. */
+	/** One request's text over the limit: the local per-request guard, sealed, or a 413 from the BFF. */
 	| 'payload_too_large'
 	/** Sealed: the gateway hit an internal fault (logged there without content). */
 	| 'internal_error'
@@ -127,6 +127,12 @@ export class GatewayError extends Error {
 
 	/** Seconds from a 429's Retry-After, when it is an integer in [1, 300]. */
 	readonly retryAfter?: number;
+
+	/** For a text sent in two or more parts: the 1-based part that failed. */
+	failedPart?: number;
+
+	/** For a text sent in two or more parts: how many parts the text had. */
+	parts?: number;
 
 	constructor(
 		code: GatewayErrorCode,

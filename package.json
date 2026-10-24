@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-anonymizator",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Protect personal data in text before it reaches an LLM: replace names, emails, IBANs and other identifiers with placeholders through the Anonymizator privacy gateway, and reveal them again offline.",
 	"license": "MIT",
 	"homepage": "https://github.com/cbuctok/n8n-nodes-anonymizator",
@@ -32,6 +32,7 @@
 		"check:fields": "node scripts/check-node-fields.mjs",
 		"smoke": "node scripts/smoke.mjs",
 		"scan": "node scripts/scan.mjs",
+		"sbom": "scripts/sbom.sh",
 		"test": "npm run build && node --test \"test/*.test.mjs\"",
 		"e2e": "node scripts/e2e-n8n.mjs",
 		"n8n:up": "docker compose up -d --wait",

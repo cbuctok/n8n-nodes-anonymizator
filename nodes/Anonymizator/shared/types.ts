@@ -12,8 +12,13 @@ export const GATEWAY_BASE_URL = 'https://anon.prosecco37.com';
 /** Credential type name. Frozen once published. */
 export const CREDENTIAL_NAME = 'anonymizatorApi';
 
-/** Default per-request timeout for gateway calls, in milliseconds. */
-export const GATEWAY_TIMEOUT_MS = 30000;
+/**
+ * Timeout of one `/v1/analyze` request (one part of a text), in milliseconds. The gateway's budget
+ * per request is 55 s (anon-app's upstream timeout; the CDN cuts at 60 s) and a part of the
+ * published size, queue wait included, is sized to finish in about 50 s on the slowest node, so the
+ * node waits as long as the CDN does.
+ */
+export const GATEWAY_TIMEOUT_MS = 60000;
 
 /** One detected range as returned by `/v1/analyze`. Offsets index into the original text. */
 export type Span = {

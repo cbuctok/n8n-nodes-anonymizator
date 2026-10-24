@@ -74,6 +74,7 @@ All node tooling goes through `@n8n/node-cli` (`n8n-node`), exposed as npm scrip
 | `npm test` | `npm run build && node --test "test/*.test.mjs"`. Unit tests against `dist/`, no network. |
 | `npm run check:fields` | `fixedCollection` consistency check (the node has none today; kept as a guard). |
 | `npm run scan` | n8n's verification scanner on the source and on the packed tarball. **The real gate.** Needs `dist/`. |
+| `npm run sbom` | `scripts/sbom.sh`: trivy SBOMs (SPDX + CycloneDX) of `package-lock.json` into the gitignored `sbom/`. Dev toolchain only; the published package has no runtime dependencies. Needs trivy. |
 | `npm run smoke` | Drives the built node against the live production gateway, without n8n. Needs the API key. |
 | `npm run e2e` | Drives the built node through a real n8n in Docker. Needs the API key and `n8n:up`. |
 | `npm run n8n:up` / `n8n:logs` / `n8n:down` | Start (and wait for healthy), follow and stop the Docker n8n. |
@@ -158,8 +159,8 @@ evidence for the others.
 
 | Layer | What it runs | What only it catches |
 | --- | --- | --- |
-| `npm test` (`test/*.test.mjs`, `node:test`; 1008 tests, 0 skipped, on 2026-10-22) | The compiled `dist/` modules and the node class with fake `IExecuteFunctions` / `ILoadOptionsFunctions`. Every case of the gateway's vectors (`test/fixtures/pgw-v2.json` and `pgw-capabilities-v1.json`, copied byte for byte from the gateway repository's `tests/vectors/`): keyconfig cases, request frame bytes, response open, sealed errors, the `possible_emoji` exchange, offsets, capabilities cases. A fake v2 gateway (`test/helpers/pgw.mjs`: an independent `node:crypto` recipient with a test root, delegation and keyconfig, injected through the `trustRootsB64url` seam) for every status and retry path. Differential and interop tests against the extension's real files (below). `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 and gateway vectors), the trust chain, wire format, every status mapping and retry path, the pipeline port's behaviour, map parsing, ID file rules, the catalog merge and filter, Detect offsets and counts, Ignore Terms, Include Placeholder Map, the new options. Fast and offline. |
-| `npm run smoke` (`scripts/smoke.mjs`, 24 scenarios) | The compiled node against **production**, with a fake context whose `httpRequestWithAuthentication` does a real `fetch` and honours n8n's options (no redirect following, no throw on error statuses, full response, Buffer bodies, timeout). | The live contract: keyconfig v2 and capabilities verifying against the pinned roots, response shape, offset unit, the text cap, status codes for a rejected key, detection on real sentences. |
+| `npm test` (`test/*.test.mjs`, `node:test`; 1043 tests, 0 skipped, on 2026-10-24) | The compiled `dist/` modules and the node class with fake `IExecuteFunctions` / `ILoadOptionsFunctions`. Every case of the gateway's vectors (`test/fixtures/pgw-v2.json` and `pgw-capabilities-v1.json`, copied byte for byte from the gateway repository's `tests/vectors/`): keyconfig cases, request frame bytes, response open, sealed errors, the `possible_emoji` exchange, offsets, capabilities cases. A fake v2 gateway (`test/helpers/pgw.mjs`: an independent `node:crypto` recipient with a test root, delegation and keyconfig, injected through the `trustRootsB64url` seam) for every status and retry path, and for long texts in parts (`test/chunker.test.mjs` ports the extension's chunker cases; `gateway.test.mjs` and `node.test.mjs` cover the split, the merge, straddling values, emoji offsets, failing parts, rate-limit waits and the `invalid_entities` restart). Differential and interop tests against the extension's real files (below). `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 and gateway vectors), the trust chain, wire format, every status mapping and retry path, the pipeline port's behaviour, map parsing, ID file rules, the catalog merge and filter, Detect offsets and counts, Ignore Terms, Include Placeholder Map, the new options. Fast and offline. |
+| `npm run smoke` (`scripts/smoke.mjs`, 24 scenarios) | The compiled node against **production**, with a fake context whose `httpRequestWithAuthentication` does a real `fetch` and honours n8n's options (no redirect following, no throw on error statuses, full response, Buffer bodies, timeout). | The live contract: keyconfig v2 and capabilities verifying against the pinned roots, response shape, offset unit, the published per-request cap, a ~40 000-character Protect and a Detect sent in parts (one request per part, one placeholder per value, offsets, Reveal round trip), status codes for a rejected key, detection on real sentences. |
 | `npm run e2e` (`scripts/e2e-n8n.mjs`) | `e2e/anonymizator-e2e.workflow.json` through a real n8n 2.44.5 in Docker over its REST API (19 nodes; "Protect No Map" also asserts Additionally Protect's `[AMOUNT_…]` and `[COMPANY_…]`, and "Check Typed" fails if the Type Only item, run with Include ID File on, has an `idFile`), a `getEntityTypes` call through `/rest/dynamic-node-parameters/options` that must return every bundled row plus at least one server-only type, then an import (no run) of every `examples/*/workflow.json` with the type prefix rewritten to `CUSTOM.`. | **n8n's parameter resolution**: expressions in json parameters, collections, the credential hidden by `displayOptions` on Reveal, the `CUSTOM.` type prefix, load options with a real credential, the tool variant being generated, icons being served; that every node type and version an example uses exists in this n8n (no "?" nodes on import). |
 | `npm run scan` (`scripts/scan.mjs`) | `@n8n/scan-community-package` 0.40.0 (lint plugin 0.37.0) on the source and on the `npm pack` tarball, as the verification pipeline does. | Rules newer than the local lint plugin, inline suppressions (which it ignores), unexpected files in the tarball. |
 
@@ -187,7 +188,7 @@ the **`anonymizator-chrome-ext` subdirectory**, not the repo root (for example
 (`test/helpers/pgw.mjs`, `test/engine-ext.mjs`, `test/placeholderMap.test.mjs`). A missing checkout
 makes these tests **skip, not fail**, which looks like a pass: when checking for drift, look for
 `# SKIP extension checkout not found` in the output (`node --test --test-reporter=tap
-"test/*.test.mjs"`). In CI they are reported as skipped too. The 2026-10-22 run had 0 skips.
+"test/*.test.mjs"`). In CI they are reported as skipped too. The 2026-10-24 run had 0 skips.
 
 **The generated differential tests use `prng` from `test/engine-ext.mjs`, a mulberry32.** The
 earlier double-precision LCG lost its low bits after a few steps (`rnd(2)` stuck at 0), so the
@@ -282,8 +283,11 @@ nodes/Anonymizator/
     keyconfig.ts            TRUST_ROOTS_B64URL, strict delegation/keyconfig v2 parsers, verifyDelegationV2,
                             verifyKeyconfigV2 (fail closed, key selection)
     capabilities.ts         strict pgw-capabilities-v1 parser, verifyCapabilitiesV1
-    gateway.ts              keyconfig acquisition (cache, serial floor), sealed /v1/analyze, capabilities
-                            fetch, error allowlists, retries, effectiveMaxTextChars
+    gateway.ts              keyconfig acquisition (cache, serial floor), sealed /v1/analyze, long texts
+                            in parts (split, sequential parts, rate-limit waits, merge), capabilities
+                            fetch, error allowlists, retries
+    chunker.ts              split / merge / assertCover / partTarget (extension lib/chunker.js)
+    limits.ts               MAX_TEXT_CHARS (10 000), the plausibility window, effectiveMaxTextChars
     gatewayMessages.ts      GATEWAY_MESSAGES, LOCAL_FAILURES, gatewayErrorText (extension wording)
     anonymizer.ts           port of the extension's lib/anonymizer.js + mask/isValidKey from id-set.js
     idModel.ts              ID set model: types and prefixes, legal forms, companySpans, fromV1,
@@ -332,7 +336,7 @@ break offline use and the privacy claim in the README.
 `node:crypto` and relative paths. The lint rule `no-restricted-imports` also lets any
 **devDependency** through, and that is a trap: the build does not bundle, so such an import passes
 lint and then fails at runtime in the user's n8n. `files` is `["dist", "NOTICE"]`; `npm pack` yields
-69 files, 164 kB (`dist/`, `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm
+75 files, 147 kB (`dist/`, `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm
 always adds). `npm run scan` fails on anything else in the tarball.
 
 **Requests go through n8n's helper.** `gateway.ts` calls
@@ -342,9 +346,22 @@ proxy support and the credential's `authenticate` block along. `GatewayContext` 
 interface both `IExecuteFunctions` and `ILoadOptionsFunctions` satisfy, so `getEntityTypes` fetches
 capabilities through the same path.
 
-**One gateway round trip per item.** `/v1/analyze` takes one `text` per sealed request; there is no
-batch endpoint. Blank text never leaves n8n (no capabilities or keyconfig request either), and text
-over the cap is refused before the text is sealed or sent.
+**One gateway round trip per part.** `/v1/analyze` takes one `text` per sealed request, at most the
+per-request cap (`effectiveMaxTextChars`, code points); there is no batch endpoint. `analyze()` in
+`gateway.ts` cuts a longer text into parts with `shared/chunker.ts` (a port of the extension's
+`lib/chunker.js`, itself the web app's `pgw-chunker.js`: same algorithm, same constants), sends
+them one after another (each through `analyzeSealed`, so each is sealed afresh with its own two
+attempts), and merges their spans: each part's code-point offsets are converted to UTF-16 against
+that part (`codePointSpansToUtf16`), shifted by the part's `start16`, sorted, exact duplicates and
+spans inside another part's span dropped, partial overlaps across a cut united; possible spans the
+same, dropped where they touch an entity. One-part texts go through the same merge. Fail closed:
+any failing part throws for the whole item (`GatewayError.failedPart` / `parts` set for two or more
+parts; `gatewayFailure` adds "This was part i of n of the text; no partial result is output." before
+the code), so the Protect pipeline runs once over the whole text or not at all. There is no length
+limit per item and no up-front refusal; the per-request code-point check in `analyzeSealed` is only
+a guard (parts are always 2 000 below the cap). Blank text never leaves n8n (no capabilities or
+keyconfig request either). The README's "Long texts" section is the user-facing description and
+the reference for API callers; keep it in step.
 
 ## Compliance model
 
@@ -388,7 +405,7 @@ over the cap is refused before the text is sealed or sent.
   against the floor, else the keyconfig is fetched once more after 2 s.
 - **Capabilities can only add.** `GET /v1/capabilities` (`pgw-capabilities-v1`) is verified with the
   same delegation rules (`verifyCapabilitiesV1`, `issued_at` at most 2 h old). It adds entity types,
-  labels and groups to the bundled catalog and sets the local text cap (within 10 000 to 1 000 000); it never
+  labels and groups to the bundled catalog and sets the per-request text cap (within 10 000 to 1 000 000); it never
   removes a bundled row or a type a bundled row sends, `possible` types never become rows, and an
   omitted `entities` filter still means every type the server has. Any failure (404 from an older
   gateway, auth, HTTP, verification, stale, below the floor) gives `null` and the bundled data:
@@ -464,7 +481,7 @@ People rarely update n8n nodes, so plan for installed versions that never update
 ## The gateway contract
 
 Every request uses `{ disableFollowRedirect: true, ignoreHttpStatusErrors: true,
-returnFullResponse: true, encoding: 'arraybuffer', json: false, timeout }` (30 s for analyze, 15 s for
+returnFullResponse: true, encoding: 'arraybuffer', json: false, timeout }` (60 s for analyze, the CDN's own cut-off, since a part of the published size may take up to ~50 s with queueing; 15 s for
 keyconfig and capabilities) and branches on `statusCode` and the content type. The response body is
 always a Buffer, JSON error bodies included. GETs send `Accept: application/json`; the analyze POST
 sends `Content-Type: application/octet-stream` and `Accept: application/octet-stream,
@@ -482,20 +499,21 @@ with **HTTP 200**.
 | 302 (or any 3xx), 401 | `auth_required` | "The Anonymizator API key was rejected" (NodeApiError). |
 | 403 `{"error":"missing_role"}` | `no_access` | "This API key has no access to Anonymizator". |
 | other 403 | allowlisted code, else `http_403` | |
-| 429 | `rate_limited` | `Retry-After` (integer 1-300 s) adds "Try again in N s."; no automatic retry. |
+| 429 | `rate_limited` | `Retry-After` (integer 1-300 s) adds "Try again in N s.". A one-part text: no automatic retry. A part of a multi-part text waits `Retry-After` (else 5 s) and is sent again, at most 3 times; a wait over 60 s fails at once (`RATE_LIMIT_*` in `gateway.ts`, as the extension's `analyzePart`). |
 | other 4xx / 5xx plain JSON | `{error}` through `KNOWN_ERROR_CODES` (the extension's allowlist), else `http_<status>` / `server_error` | The JSON is unauthenticated: `detail` / `error_description` are never kept or shown. |
 | sealed answer with `error` | through `SEALED_ERROR_CODES` (`invalid_payload`, `invalid_entities`, `payload_too_large`, `hpke_bad_payload`, `internal_error`), else `http_<status>` | |
 | `hpke_unknown_key`, `hpke_key_expired` | | Refetch the keyconfig (bypassing the cache) and send once more with a fresh seal. |
 | plain (unsealed) 5xx, `busy`, sealed `internal_error` | | Send once more with a fresh seal after 1 s, then the "temporarily unavailable" message. The HTTP status of a sealed answer is unauthenticated and never triggers a retry: a sealed `invalid_payload` with HTTP 503, or an octet-stream 5xx that does not open, is not resent. |
 | `hpke_replay`, `rate_limited`, `hpke_stale` | | Never retried. `hpke_stale`: "The n8n host's clock is off". |
-| `invalid_entities` with a filter sent | | One more analysis without `entities`; output `entityFilterIgnored: true`. Never without a filter. |
+| `invalid_entities` with a filter sent | | The whole text once more without `entities`, from the first part; output `entityFilterIgnored: true`. Never without a filter. |
 | keyconfig 5xx (plain) | | Fetched once more at once (harmless to resend). |
-| text over `effectiveMaxTextChars` | `payload_too_large` | Local, before anything is sealed: "The text is too long" with the real limit. A 413 from the BFF or a sealed `payload_too_large` gets the same title with a description that names no number ("The Anonymizator gateway refused the text as too long for one request..."), because the text already passed the local cap. |
+| one part over `effectiveMaxTextChars` (code points) | `payload_too_large` | Local guard in `analyzeSealed`, before anything is sealed; never reached through `analyze`, whose parts are 2 000 below the cap. A 413 from the BFF and a sealed `payload_too_large` get the same message: "Part of the text was too long for one request", naming no number (there is no limit per item). |
 | no response | `timeout` / `offline` | NodeOperationError. This includes n8n-core's wrapping: `httpRequestWithAuthentication` rethrows every axios failure as a `NodeApiError`, so a NodeApiError without a 3-digit HTTP status whose `cause` is a plain Error (ECONNREFUSED, ENOTFOUND, ECONNABORTED, ETIMEDOUT...) is mapped from the cause's code and message (`passesThrough` in `gateway.ts`). A NodeOperationError, a NodeApiError with a real status, or one around an n8n error (a missing credential) passes through unchanged. |
 | 2xx that is not sealed, does not open, or has a span outside the text | `hpke_bad_response` | NodeOperationError (fail closed). |
 
-So an analysis is at most **two HTTP attempts**, each freshly sealed, and the `invalid_entities`
-fallback is one more analysis. The old 500 ms retry and the "sealed body over 256 KiB" rule are gone.
+So the analysis of one part is at most **two HTTP attempts** (plus up to three rate-limit waits in a
+multi-part text), each freshly sealed, and the `invalid_entities` fallback is one more run over all
+parts. The old 500 ms retry and the "sealed body over 256 KiB" rule are gone.
 New codes since 0.1.1: `hpke_bad_frame`, `hpke_bad_version`, `hpke_key_expired`, `hpke_bad_payload`,
 `hpke_replay`, `hpke_not_configured`, `hpke_bad_key_material`, `payload_too_large`,
 `invalid_payload`, `internal_error`, `busy`, `upstream_unavailable`, `upstream_timeout`,
@@ -508,9 +526,8 @@ Local failures (`LOCAL_FAILURES`: the keyconfig codes, `hpke_seal_failed`, `hpke
 even when a response arrived; the rest become `NodeApiError` with the HTTP code. The wording lives in
 `GATEWAY_MESSAGES` in `shared/gatewayMessages.ts`, taken from the extension's
 `sidepanel/sidepanel-constants.js` and adapted to n8n; `gatewayErrorText` adds the Retry-After
-sentence and, only for the local refusal (no `httpCode`), the real character limit, and
-interpolates nothing but numbers. `analyze()` passes `maxTextChars` only for that local refusal. Every message ends
-with `(code: ...)` in the description.
+sentence, `failedPartText` the failed part of a multi-part text, and both interpolate nothing but
+numbers. Every message ends with `(code: ...)` in the description.
 
 ### 302, not 401, unless you ask for JSON
 
@@ -557,9 +574,11 @@ gateway vectors' `offsets` and `possible_emoji` cases pin this.
 Earlier (2026-10-05/06, protocol v1; the detection notes still apply):
 
 - Scores seen: 0.85 and 1.
-- Size: 100k characters analysed in about 5 s; 1M characters gave a **502** after about 13 s. Text
-  over the cap is now refused locally (and the BFF answers an oversized frame with a plain 413
-  `payload_too_large`, gateway `docs/HPKE.md`).
+- Size: 100k characters analysed in about 5 s; 1M characters gave a **502** after about 13 s (the
+  BFF answers an oversized frame with a plain 413 `payload_too_large`, gateway `docs/HPKE.md`).
+  Superseded by the per-request cap: since 2026-10-24 the hosted gateway publishes
+  `max_text_chars=14000` (infra `docs/reports/2026-10-24-chunk-size.md`), and the node sends parts
+  of 12 000. Smoke 2026-10-24 (server 2026.10.24.4): 40 067 characters in 4 parts, about 48 s.
 - Detection quirks are server-side, not client bugs: "Janez Novak wrote from ..." and
   "Marko Horvat (...)" were not tagged PERSON; "Ana Kovač" was tagged as only "Kovač"; with a
   PERSON-only filter, "IBAN SI56" was tagged PERSON.
@@ -590,7 +609,9 @@ production), with `Date.now()` (timers are banned); they live for the n8n proces
   cost: a deployment whose `/v1/capabilities` keeps answering 3xx/401/403 gets one capabilities GET
   per item. `fetchCapabilities` never throws.
 - `effectiveMaxTextChars(caps)` = `min(max_text_chars, floor((max_body_bytes - 8192) / 6))` when
-  that lies in [10 000, 1 000 000], else the bundled 120 000.
+  that lies in [10 000, 1 000 000], else the bundled 10 000 (= `MIN_TEXT_CHARS`, so it never
+  exceeds a cap a server publishes). Lives in `shared/limits.ts` (shared by `gateway.ts` and
+  `chunker.ts`) and is re-exported from `gateway.ts`; `partTarget(caps)` = min(that - 2000, 100000).
 - `clearGatewayCaches()` resets all of it (tests).
 
 ## Placeholders, maps and the extension
@@ -852,15 +873,18 @@ e.g. the n8n node)"; the vectors in `test/fixtures/` are copied byte for byte fr
 `tests/vectors/`.
 
 Ported from extension **2026.10.19.1**, repository HEAD `74dc94b` (2026-10-21). The extension's
-history was rewritten on 2026-10-19, so the old `a4c773b` (0.15.0) baseline no longer exists. Last
-upstream commit per source file at port time:
+history was rewritten on 2026-10-19, so the old `a4c773b` (0.15.0) baseline no longer exists. The
+long-text parts (chunker) were ported on 2026-10-24 from `origin/dev` at `de85568` (extension
+2026.10.24.2); read the extension with `git show origin/dev:<path>` when the local checkout is behind.
+Last upstream commit per source file at port time:
 
 | Extension file | Ported to | Upstream commit |
 | --- | --- | --- |
 | `lib/anonymizer.js` (sha256 `0df5204e...`) | `shared/anonymizer.ts` | `967b3ec` (2026-10-09) |
 | `lib/hpke.js` (sha256 `ee0f1f54...`) | `shared/hpke.ts`, `shared/keyconfig.ts`, `shared/capabilities.ts` | `1c35fbd` (2026-10-09) |
 | `lib/gateway.js` (keyconfig acquisition, analyze, status handling) | `shared/gateway.ts`, `shared/errors.ts` | `3656111` (2026-10-19) |
-| `lib/capabilities.js`, `lib/entities.js` | `shared/gateway.ts` (`fetchCapabilities`, `effectiveMaxTextChars`), `shared/entities.ts` | `3e50316` (2026-10-19) |
+| `lib/capabilities.js`, `lib/entities.js` | `shared/gateway.ts` (`fetchCapabilities`), `shared/entities.ts` | `3e50316` (2026-10-19) |
+| `lib/chunker.js` (body identical to the web app's `demo/js/engine/pgw-chunker.js`), `lib/messages.js` (`analyzePart`, `runProtectParts`), `lib/gateway.js` (`MAX_TEXT_CHARS` 10 000, `codePointLength`, `effectiveMaxTextChars`) | `shared/chunker.ts`, `analyze` in `shared/gateway.ts`, `shared/limits.ts` | `1488b79` (2026-10-24, on `origin/dev`) |
 | `lib/id-model.js`, `lib/id-rules.js`, `lib/id-names.js` | `shared/idModel.ts` | `3e50316` (2026-10-19) |
 | `lib/extra-detect.js` | `shared/extraDetect.ts` | `3e50316` (2026-10-19) |
 | `sidepanel/sidepanel-idfile.js` | `shared/placeholderMap.ts` | `3e50316` (2026-10-19) |
@@ -900,7 +924,11 @@ text, which backtracks quadratically. These do change results, on inputs the ext
 protected, `flatTypeFromKey`, `extraBlockTest`, the `entityFilter` rule above, and the Share Map
 merge rules. Not ported: storage,
 locks, rev/dirty/epoch bookkeeping, the session queue, the side panel, the `opt_in` default and
-stored entity deviations, OIDC refresh, and the extension's `self`/`window` globals.
+stored entity deviations, OIDC refresh, the extension's `self`/`window` globals, and from the
+long-text run its progress in `chrome.storage.session`, `CANCEL_PROTECT` and the service-worker
+keepalive (an n8n item has no panel to report to; the chunker's `headingEnds` option is ported but
+unused, since the node's input is plain text). The chunker's error texts say `chunker` instead of
+`anonChunker`, and its exports are not frozen.
 
 ## Lint and scanner gotchas
 
@@ -1061,8 +1089,8 @@ version n8n 2.44.5 ships) and the latest published packages of similar nodes. Fa
 ## Licence
 
 MIT, © 2026 Greg Evseev (`LICENSE.md`). The code ported from the Anonymizator browser extension
-(`anonymizer.js`, `hpke.js`, the gateway and capabilities logic, `entities.js`, the ID set model and
-rules, the Protect pipeline, Additionally Protect, possible IDs, the error wording, the ID file
+(`anonymizer.js`, `hpke.js`, the gateway and capabilities logic, the chunker, `entities.js`, the ID
+set model and rules, the Protect pipeline, Additionally Protect, possible IDs, the error wording, the ID file
 format) is © 2026
 Prosecco 37 d.o.o. and contributed under the MIT licence with permission (decided 2026-10-05).
 `NOTICE` records this and ships in the npm package (`files` lists it). Keep `NOTICE` in step when

@@ -15,9 +15,6 @@ import type { GatewayErrorCode } from './errors';
 
 export type GatewayMessage = { message: string; description: string };
 
-/** The text limit the gateway documents (the local pre-check may use a verified, other value). */
-const DEFAULT_LIMIT_TEXT = '120,000';
-
 const SERVER: GatewayMessage = {
 	message: 'The Anonymizator gateway could not process the text',
 	description:
@@ -37,15 +34,15 @@ const REJECTED: GatewayMessage = {
 	message: 'The Anonymizator gateway rejected the request',
 	description: 'Update the n8n-nodes-anonymizator package to the latest version.',
 };
+/**
+ * There is no limit per item: a long text is split into parts below the gateway's published
+ * per-request limit. This means one part was still refused as too long (a 413 from the BFF, a sealed
+ * `payload_too_large`, or the local per-request guard), so no number is named.
+ */
 const TOO_LONG: GatewayMessage = {
-	message: 'The text is too long',
-	description: `The limit is ${DEFAULT_LIMIT_TEXT} characters per item. Split the text into smaller items and protect them one by one.`,
-};
-/** A too-long text refused by the BFF or the gateway, after it passed the local cap. */
-const TOO_LONG_REMOTE: GatewayMessage = {
-	message: TOO_LONG.message,
+	message: 'Part of the text was too long for one request',
 	description:
-		'The Anonymizator gateway refused the text as too long for one request. Split the text into smaller items and protect them one by one.',
+		"The node splits long texts into parts below the Anonymizator gateway's per-request limit, so this should not happen. Try again; if it keeps happening, update the n8n-nodes-anonymizator package to the latest version.",
 };
 const AUTH: GatewayMessage = {
 	message: 'The Anonymizator API key was rejected',
@@ -79,7 +76,8 @@ export const GATEWAY_MESSAGES: Record<
 	},
 	timeout: {
 		message: 'The Anonymizator gateway did not answer in time',
-		description: 'Try again. Very long texts take longer; consider splitting them.',
+		description:
+			'Try again. Each part of a long text must be answered within 60 s; if the gateway is busy, enable Retry On Fail with a wait between tries, or try again later.',
 	},
 	payload_too_large: TOO_LONG,
 	text_too_large: TOO_LONG,
@@ -139,8 +137,8 @@ export const GATEWAY_MESSAGES: Record<
 
 /**
  * Failures decided on the n8n side, even when a response was received (an unverifiable keyconfig
- * arrives with HTTP 200). They are reported as NodeOperationError, not as an API error. A local
- * text-length refusal (`payload_too_large` without an HTTP status) is local by having no status.
+ * arrives with HTTP 200). They are reported as NodeOperationError, not as an API error. The local
+ * per-request guard (`payload_too_large` without an HTTP status) is local by having no status.
  */
 export const LOCAL_FAILURES: ReadonlySet<GatewayErrorCode> = new Set<GatewayErrorCode>([
 	'hpke_unverified_keyconfig',
@@ -159,13 +157,12 @@ function isKnownCode(code: string): code is keyof typeof GATEWAY_MESSAGES {
 
 /**
  * The message for `code`, with the extension's additions: "Try again in N s." for a 429 with a
- * usable Retry-After, the actual limit for a text refused locally as too long (a server refusal,
- * which has an `httpCode`, names no limit), and a fixed sentence for any
- * `http_<status>` (or unknown) code. Never interpolates anything but numbers.
+ * usable Retry-After, and a fixed sentence for any `http_<status>` (or unknown) code. Never
+ * interpolates anything but numbers.
  */
 export function gatewayErrorText(
 	code: string,
-	extra?: { retryAfter?: number; maxTextChars?: number; httpCode?: number },
+	extra?: { retryAfter?: number; httpCode?: number },
 ): GatewayMessage {
 	if (!isKnownCode(code)) {
 		const status = extra?.httpCode;
@@ -183,19 +180,21 @@ export function gatewayErrorText(
 			return { message: base.message, description: `${base.description} Try again in ${wait} s.` };
 		}
 	}
-	const limit = extra?.maxTextChars;
-	const tooLong = code === 'payload_too_large' || code === 'text_too_large';
-	// A refusal that came with a response (413 from the BFF, sealed from the gateway) is not about
-	// the local cap the text already passed: no number is claimed then.
-	if (tooLong && typeof extra?.httpCode === 'number') return TOO_LONG_REMOTE;
-	if (tooLong && Number.isSafeInteger(limit) && (limit as number) > 0) {
-		return {
-			message: base.message,
-			description: base.description.replace(
-				DEFAULT_LIMIT_TEXT,
-				String(limit).replace(/\B(?=(\d{3})+(?!\d))/g, ','),
-			),
-		};
-	}
 	return base;
+}
+
+/**
+ * The sentence that names the failed part of a text sent in two or more parts (integers only), as
+ * the extension's "(Part i of n; nothing was protected.)", or '' for a one-part text.
+ */
+export function failedPartText(failedPart: unknown, parts: unknown): string {
+	if (!Number.isSafeInteger(failedPart) || !Number.isSafeInteger(parts)) return '';
+	if (
+		(parts as number) < 2 ||
+		(failedPart as number) < 1 ||
+		(failedPart as number) > (parts as number)
+	) {
+		return '';
+	}
+	return `This was part ${failedPart} of ${parts} of the text; no partial result is output.`;
 }

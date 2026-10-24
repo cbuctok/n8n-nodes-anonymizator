@@ -222,16 +222,20 @@ describe('capabilities vectors (pgw-capabilities-v1.json)', () => {
 });
 
 describe('effectiveMaxTextChars', () => {
-	it('bundled 120 000 without a document, the plausible server value otherwise', () => {
-		assert.equal(G.effectiveMaxTextChars(null), 120000);
+	it('bundled 10 000 (the floor) without a document, the plausible server value otherwise', () => {
+		assert.equal(G.MAX_TEXT_CHARS, 10000);
+		assert.equal(G.MAX_TEXT_CHARS, G.MIN_TEXT_CHARS, 'never above a cap the node accepts');
+		assert.equal(G.effectiveMaxTextChars(null), 10000);
+		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 14000, maxBodyBytes: 1048576 }), 14000);
+		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 10000, maxBodyBytes: 1048576 }), 10000);
 		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 120000, maxBodyBytes: 1048576 }), 120000);
 		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 50000, maxBodyBytes: 1048576 }), 50000);
 		// Body cap binds: floor((200000 - 8192) / 6) = 31968.
 		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 120000, maxBodyBytes: 200000 }), 31968);
 		// Out of [10 000, 1 000 000]: the bundled value.
-		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 9999, maxBodyBytes: 1048576 }), 120000);
-		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 2e6, maxBodyBytes: 2e7 }), 120000);
-		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 1.5, maxBodyBytes: 1048576 }), 120000);
+		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 9999, maxBodyBytes: 1048576 }), 10000);
+		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 2e6, maxBodyBytes: 2e7 }), 10000);
+		assert.equal(G.effectiveMaxTextChars({ maxTextChars: 1.5, maxBodyBytes: 1048576 }), 10000);
 	});
 });
 

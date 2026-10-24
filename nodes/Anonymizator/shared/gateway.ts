@@ -11,7 +11,12 @@
  * load-options context alike.
  *
  * Behaviour:
- * - the text cap is checked before anything is sent (`payload_too_large`, no request);
+ * - a text longer than one request is cut into parts (`chunker.ts`, the extension's and web app's
+ *   algorithm), analysed one after another, each sealed afresh, and the parts' spans are merged
+ *   back onto the whole text; any part that fails fails the whole text (no partial result). A part
+ *   of a multi-part text waits out a rate limit (Retry-After, at most 3 times, at most 60 s each);
+ * - the per-request cap (code points) is checked before a request is sealed (`payload_too_large`,
+ *   no request); the chunker keeps every part 2 000 below it, so this is only a guard;
  * - payload `{ text }`, plus `entities` only for a non-empty filter, plus `possible: true` only when
  *   asked for, so the request is otherwise byte-for-byte the same;
  * - offsets come back in Unicode code points and are converted to UTF-16 against the text that was
@@ -20,7 +25,8 @@
  *   `hpke_unknown_key` / `hpke_key_expired` (keyconfig refetched) or a server error (a plain,
  *   unsealed 5xx, `busy`, sealed `internal_error`; after 1 s; a sealed answer's status is ignored).
  *   Never after `hpke_replay`, `rate_limited`, `hpke_stale`;
- * - `invalid_entities` with a filter: one more analysis without the filter, `entityFilterIgnored`;
+ * - `invalid_entities` with a filter: the whole text once more without the filter, from the first
+ *   part, `entityFilterIgnored`;
  * - plain-JSON codes pass an allowlist (`KNOWN_ERROR_CODES`), sealed ones `SEALED_ERROR_CODES`;
  *   server text (`detail`, `error_description`) is never kept.
  *
@@ -35,14 +41,22 @@ import {
 	verifyCapabilitiesV1,
 	type VerifiedCapabilities,
 } from './capabilities';
+import { merge, partTargetFor, split, type TextPart } from './chunker';
 import { GatewayError, type GatewayErrorCode } from './errors';
 import { gatewayErrorText } from './gatewayMessages';
 import { sealRequestV2, type SealedRequest, type TestEphemeral } from './hpke';
 import { TRUST_ROOTS_B64URL, verifyKeyconfigV2, type KeyconfigVerification } from './keyconfig';
+import { MAX_TEXT_CHARS } from './limits';
 import { CREDENTIAL_NAME, GATEWAY_BASE_URL, GATEWAY_TIMEOUT_MS, type Span } from './types';
 
 export { GatewayError };
 export type { VerifiedCapabilities };
+export {
+	effectiveMaxTextChars,
+	MAX_TEXT_CHARS,
+	MAX_TEXT_CHARS_CEILING,
+	MIN_TEXT_CHARS,
+} from './limits';
 
 /**
  * The part of an n8n context the gateway needs. Both `IExecuteFunctions` and
@@ -70,6 +84,8 @@ export type GatewayTestSeams = {
 	retryDelayMs?: number;
 	/** Pause before the renewal-race keyconfig refetch, in ms (default 2000). */
 	keyconfigRetryDelayMs?: number;
+	/** Length of one Retry-After second in a multi-part rate-limit wait, in ms (default 1000). */
+	retryAfterSecondMs?: number;
 	/** Fixed ephemeral key (test vectors only: reusing it reuses the AES-GCM key and nonce). */
 	testEphemeral?: TestEphemeral;
 };
@@ -77,7 +93,10 @@ export type GatewayTestSeams = {
 export type AnalyzeOptions = {
 	/** Ask for the review-only `possible` spans (`"possible": true` in the sealed payload). */
 	possible?: boolean;
-	/** Local text cap in UTF-16 units; defaults to MAX_TEXT_CHARS (see effectiveMaxTextChars). */
+	/**
+	 * Per-request text cap in code points (`effectiveMaxTextChars`); defaults to MAX_TEXT_CHARS.
+	 * A longer text is sent in parts of `partTargetFor(maxTextChars)` code points.
+	 */
 	maxTextChars?: number;
 } & GatewayTestSeams;
 
@@ -94,16 +113,6 @@ export type GatewayAnalyzeResult = {
 	entityFilterIgnored: boolean;
 };
 
-/** The gateway's text cap (characters); text.length (UTF-16) is never below its code-point count. */
-export const MAX_TEXT_CHARS = 120000;
-/** Bounds for a cap taken from a verified capabilities document. */
-export const MIN_TEXT_CHARS = 10000;
-export const MAX_TEXT_CHARS_CEILING = 1000000;
-// Body headroom for the frame, padding and JSON around the text, and the worst case of 6 body
-// bytes per character (a JSON \uXXXX escape).
-const BODY_OVERHEAD_BYTES = 8192;
-const BODY_BYTES_PER_CHAR = 6;
-
 /** Keyconfig cache TTL, matching the extension. The cached document is re-verified on every use. */
 export const KEYCONFIG_TTL_MS = 10 * 60 * 1000;
 /** Capabilities: refetch a verified document after this; after a failed attempt wait as long. */
@@ -113,6 +122,13 @@ export const CAPABILITIES_RETRY_MS = 5 * 60 * 1000;
 export const ANALYZE_RETRY_DELAY_MS = 1000;
 /** Pause before the renewal-race keyconfig refetch. */
 export const KEYCONFIG_RETRY_DELAY_MS = 2000;
+/**
+ * A part of a multi-part text waits out a rate limit up to this many times (Retry-After, else
+ * RATE_LIMIT_DEFAULT_S; a longer wait than RATE_LIMIT_MAX_WAIT_S fails the text), as the extension.
+ */
+export const RATE_LIMIT_WAITS = 3;
+export const RATE_LIMIT_DEFAULT_S = 5;
+export const RATE_LIMIT_MAX_WAIT_S = 60;
 /** Keyconfig and capabilities requests are abandoned after this ('timeout'). */
 export const KEYCONFIG_TIMEOUT_MS = 15000;
 
@@ -465,10 +481,9 @@ async function gatewayFetch(
 	return { ok: true, status, data: parseJson(response.body) };
 }
 
-function gatewayError(failure: FetchFailure, maxTextChars?: number): GatewayError {
+function gatewayError(failure: FetchFailure): GatewayError {
 	const text = gatewayErrorText(failure.error, {
 		retryAfter: failure.retryAfter,
-		maxTextChars,
 		httpCode: failure.status,
 	});
 	return new GatewayError(
@@ -723,8 +738,18 @@ function sealFor(
 }
 
 /**
- * Seal {text[, entities][, possible]}, POST it, open the sealed answer (`analyzeSealed`). At most
- * two HTTP attempts, each with a FRESH seal.
+ * The length of `text` in Unicode code points (the server's len(text)); a lone surrogate counts as
+ * one, as in codePointSpansToUtf16.
+ */
+function codePointLength(text: string): number {
+	return /[\uD800-\uDFFF]/.test(text) ? Array.from(text).length : text.length;
+}
+
+/**
+ * Seal {text[, entities][, possible]}, POST it, open the sealed answer (`analyzeSealed`): ONE
+ * request's worth of text (one part). At most two HTTP attempts, each with a FRESH seal. A text over
+ * the per-request cap (code points) is refused before anything is sealed; the chunker keeps every
+ * part below it, so this is only a guard.
  */
 async function analyzeSealed(
 	ctx: GatewayContext,
@@ -732,6 +757,9 @@ async function analyzeSealed(
 	filter: string[] | undefined,
 	options: AnalyzeOptions | undefined,
 ): Promise<AnalyzeOutcome> {
+	if (codePointLength(text) > (options?.maxTextChars ?? MAX_TEXT_CHARS)) {
+		return { ok: false, error: 'payload_too_large' };
+	}
 	const wantPossible = options?.possible === true;
 	const payload: Record<string, unknown> =
 		filter !== undefined && filter.length > 0 ? { text, entities: filter } : { text };
@@ -790,10 +818,47 @@ async function analyzeSealed(
 }
 
 /**
+ * One part, with the multi-part rate-limit rule: a part of a text of two or more parts waits out a
+ * 429 (Retry-After, else RATE_LIMIT_DEFAULT_S) up to RATE_LIMIT_WAITS times, then fails; a wait
+ * longer than RATE_LIMIT_MAX_WAIT_S fails at once. A one-part text answers rate_limited at once, as
+ * before (Retry On Fail is the n8n way to wait there).
+ */
+async function analyzePart(
+	ctx: GatewayContext,
+	text: string,
+	filter: string[] | undefined,
+	multiPart: boolean,
+	options: AnalyzeOptions | undefined,
+): Promise<AnalyzeOutcome> {
+	for (let waits = 0; ; waits++) {
+		const outcome = await analyzeSealed(ctx, text, filter, options);
+		if (outcome.ok || outcome.error !== 'rate_limited' || !multiPart || waits >= RATE_LIMIT_WAITS) {
+			return outcome;
+		}
+		const seconds =
+			outcome.retryAfter !== undefined && outcome.retryAfter > 0
+				? outcome.retryAfter
+				: RATE_LIMIT_DEFAULT_S;
+		if (seconds > RATE_LIMIT_MAX_WAIT_S) return outcome;
+		await sleep(seconds * (options?.retryAfterSecondMs ?? 1000));
+	}
+}
+
+/**
  * Sends `text` sealed to the gateway and returns the detected spans (UTF-16 offsets into `text`).
  * `entityTypes` undefined or empty means "all types" (the field is omitted). With
  * `options.possible`, also returns the review-only `possible` spans. Throws GatewayError on every
- * failure; nothing is sent when the text is over `options.maxTextChars` (default 120 000).
+ * failure.
+ *
+ * There is no length limit: a text longer than one request (`options.maxTextChars`, the per-request
+ * cap in code points, MAX_TEXT_CHARS by default) is cut into parts of
+ * min(maxTextChars - 2000, 100 000) code points at line ends (`chunker.split`), the parts are
+ * analysed one after another (each sealed afresh, a fresh frame per request), and their spans,
+ * UTF-16 offsets into each part, are shifted by the part's UTF-16 start and merged
+ * (`chunker.merge`). Fail closed: any part that fails throws for the whole text, with
+ * `failedPart` / `parts` set on the GatewayError when there are two or more parts; nothing of the
+ * other parts is returned. `invalid_entities` with a filter restarts the whole text once without
+ * the filter, from the first part.
  */
 export async function analyze(
 	ctx: GatewayContext,
@@ -801,48 +866,37 @@ export async function analyze(
 	entityTypes?: string[],
 	options?: AnalyzeOptions,
 ): Promise<GatewayAnalyzeResult> {
-	const maxTextChars = options?.maxTextChars ?? MAX_TEXT_CHARS;
-	if (typeof text === 'string' && text.length > maxTextChars) {
-		// The only failure that names the limit: the one that refused the text here.
-		throw gatewayError({ ok: false, error: 'payload_too_large' }, maxTextChars);
-	}
-	const filter =
-		Array.isArray(entityTypes) && entityTypes.length > 0 ? [...entityTypes] : undefined;
-	let outcome = await analyzeSealed(ctx, text, filter, options);
+	const parts: TextPart[] = split(text, partTargetFor(options?.maxTextChars ?? MAX_TEXT_CHARS));
+	let filter = Array.isArray(entityTypes) && entityTypes.length > 0 ? [...entityTypes] : undefined;
 	let entityFilterIgnored = false;
-	if (!outcome.ok && outcome.error === 'invalid_entities' && filter !== undefined) {
-		// The gateway refused our entity-type names (version skew). Fail OPEN to complete
-		// anonymization, the privacy-safe direction, exactly once, and flag it.
-		entityFilterIgnored = true;
-		outcome = await analyzeSealed(ctx, text, undefined, options);
+	const results: Array<{ entities: Span[]; possible: PossibleSpan[] }> = [];
+	for (let index = 0; index < parts.length; index++) {
+		const outcome = await analyzePart(ctx, parts[index].text, filter, parts.length > 1, options);
+		if (!outcome.ok && outcome.error === 'invalid_entities' && filter !== undefined) {
+			// The gateway refused our entity-type names (version skew). Fail OPEN to complete
+			// anonymization, the privacy-safe direction, exactly once for the whole text, and flag it.
+			entityFilterIgnored = true;
+			filter = undefined;
+			results.length = 0;
+			index = -1; // from the first part again
+			continue;
+		}
+		if (!outcome.ok) {
+			const error = gatewayError(outcome);
+			if (parts.length > 1) {
+				error.failedPart = index + 1;
+				error.parts = parts.length;
+			}
+			throw error;
+		}
+		results[index] = { entities: outcome.spans, possible: outcome.possible };
 	}
-	// A remote payload_too_large is not about the local cap, which the text already passed.
-	if (!outcome.ok) throw gatewayError(outcome);
-	return { spans: outcome.spans, possible: outcome.possible, entityFilterIgnored };
+	const merged = merge(parts, results);
+	return { spans: merged.entities, possible: merged.possible, entityFilterIgnored };
 }
 
 // ---------------------------------------------------------------------------------------------
 // Capabilities
-
-/**
- * The local text cap: the server's, from a verified capabilities document, when it is plausible
- * (v = min(max_text_chars, floor((max_body_bytes - 8192) / 6)) within [10 000, 1 000 000]), else
- * the bundled 120 000. The BFF and the gateway still enforce their own caps.
- */
-export function effectiveMaxTextChars(
-	capabilities: { maxTextChars?: number; maxBodyBytes?: number } | null | undefined,
-): number {
-	if (!capabilities) return MAX_TEXT_CHARS;
-	const { maxTextChars, maxBodyBytes } = capabilities;
-	if (!Number.isSafeInteger(maxTextChars) || !Number.isSafeInteger(maxBodyBytes)) {
-		return MAX_TEXT_CHARS;
-	}
-	const v = Math.min(
-		maxTextChars as number,
-		Math.floor(((maxBodyBytes as number) - BODY_OVERHEAD_BYTES) / BODY_BYTES_PER_CHAR),
-	);
-	return v >= MIN_TEXT_CHARS && v <= MAX_TEXT_CHARS_CEILING ? v : MAX_TEXT_CHARS;
-}
 
 async function refreshCapabilities(
 	ctx: GatewayContext,
