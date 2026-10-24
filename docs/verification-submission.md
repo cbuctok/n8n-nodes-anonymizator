@@ -103,7 +103,7 @@ Each sentence is from reading the latest published package (checked 2026-10-22);
 ## Notes for the reviewer
 
 - **Scope**: no runtime dependencies. `dist/` requires only `n8n-workflow` and Node.js's built-in
-  `node:crypto`; `npm pack` yields 69 files (164 kB). No `eslint-disable` comments anywhere. The
+  `node:crypto`; `npm pack` yields 75 files (147 kB). No `eslint-disable` comments anywhere. The
   scanner (`@n8n/scan-community-package` 0.40.0) runs in CI on the source and on the packed tarball.
 - **Transport**: every request goes through `helpers.httpRequestWithAuthentication`, so n8n's proxy
   settings and timeouts apply. There is no base URL field: the node only talks to
@@ -134,9 +134,11 @@ Each sentence is from reading the latest published package (checked 2026-10-22);
   tool returns only placeholders. Detect returns no values unless **Include Values** is on. Reveal
   carries a notice not to expose it as a tool where the agent's output leaves the user's control.
   The README has a safe recipe; the recommended layout is Protect before the agent and Reveal after.
-- **Cost**: one gateway request per item for Protect and Detect (plus a key fetch at most every ten
-  minutes and a capabilities fetch at most every five); Reveal is free and offline. Items run one
-  after another. Texts over 120,000 characters are refused before they are sent.
+- **Cost**: one gateway request per item for Protect and Detect, or one per part for a text longer
+  than the gateway's per-request limit (14,000 characters on the hosted gateway; the node splits at
+  line ends and merges the results, see the README's "Long texts"), plus a key fetch at most every
+  ten minutes and a capabilities fetch at most every five; Reveal is free and offline. Items and
+  parts run one after another.
 - **Execution data**: n8n stores the original text and the map in execution data like any output;
   the Protect notice says so, and the example workflow does not save successful production runs.
 
@@ -145,12 +147,13 @@ Each sentence is from reading the latest published package (checked 2026-10-22);
 Run on the commit to be tagged:
 
 - `npm run lint`, `npx tsc --noEmit -p .`, `node scripts/check-node-fields.mjs`: pass.
-- `npm test`: unit tests against `dist/` (1009 on 2026-10-22, none skipped), including the RFC 9180 vector, the
+- `npm test`: unit tests against `dist/` (1043 on 2026-10-24, none skipped), including the RFC 9180 vector, the
   gateway's protocol and capabilities vectors, a fake HPKE gateway for every status and retry path,
   and differential and interop tests against the Anonymizator browser extension's own files.
 - `npm run scan` (`@n8n/scan-community-package` 0.40.0): `[PASS] source` and `[PASS] packed tarball`.
 - `npm run smoke`: the built node against the production gateway with synthetic data (24 scenarios:
-  key configuration and capabilities verification, the text limit, Protect in every style, Detect,
+  key configuration and capabilities verification, a ~40,000-character Protect and a Detect sent in
+  parts, Protect in every style, Detect,
   Ignore Terms, Include Placeholder Map off, Additionally Protect, Include Possible IDs, the entity
   type list, Reveal, a rejected key).
 - `npm run e2e`: a real n8n 2.44.5 in Docker runs a 19-node workflow covering every operation and

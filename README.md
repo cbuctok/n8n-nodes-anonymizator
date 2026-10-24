@@ -286,16 +286,59 @@ pass it back in as **Existing Placeholder Map** next time.
 
 ### Size and speed
 
-One gateway request per item. Up to 120,000 characters per item (or the limit the gateway's signed
-capabilities state); a longer text stops the item with "The text is too long", naming the limit,
-before the text is encrypted or sent (if the gateway itself refuses a text as too long, the message
-names no limit). 100,000 characters took about 5 seconds when measured. Split long documents
-into several items. The gateway also limits how many requests an account can make per minute; when
-it refuses, the item stops with "Too many requests" (enable **Retry On Fail** with a wait between
-tries). Detection quality depends on the gateway's models. NER is statistical: it can miss a name or tag
-only part of one, especially in unusual sentence structures, so always review protected text before
-relying on it for anything sensitive. Values already in an Existing Placeholder Map are always
+There is no length limit per item. The gateway accepts a limited amount of text per request (14,000
+characters on the hosted gateway, published in its signed capabilities), so the node sends a longer
+text in parts, one after another, and puts the results back together; see
+[Long texts](#long-texts-how-the-node-splits-them). A short text is one request. Each part takes
+roughly 1 second per 1,000 characters on the hosted gateway (a 40,000-character text, four parts,
+took about 48 seconds when measured), and each request may take up to 60 seconds before the node
+gives up. The gateway also limits how many requests an account can make per minute: a text in
+several parts waits out a refusal itself (up to three times, as long as the gateway asks, at most
+60 seconds each), while a one-request text stops at once with "Too many requests" (enable
+**Retry On Fail** with a wait between tries). Detection quality depends on the gateway's models.
+NER is statistical: it can miss a name or tag only part of one, especially in unusual sentence
+structures, so always review protected text before relying on it for anything sensitive. Values already in an Existing Placeholder Map are always
 replaced, whether or not the gateway detects them.
+
+### Long texts: how the node splits them
+
+This node is the reference implementation for calling the Anonymizator API directly. The gateway
+answers one `text` per request and refuses a text longer than its per-request limit, so a client
+has to split. The node does it the way the Anonymizator web app and browser extension do
+(`nodes/Anonymizator/shared/chunker.ts` and `analyze` in `shared/gateway.ts`):
+
+1. **The per-request limit** is `max_text_chars` from the gateway's signed capabilities document
+   (`GET /v1/capabilities`), further capped by `floor((max_body_bytes - 8192) / 6)`, and used only
+   when it lies between 10,000 and 1,000,000. Without a verified document the node assumes 10,000,
+   the bottom of that range, so it never sends more than any gateway it accepts would take. The
+   hosted gateway publishes 14,000.
+2. **The part size** is that limit minus 2,000, at most 100,000 (12,000 on the hosted gateway),
+   counted in Unicode code points, as the gateway counts (Python `len`), not JavaScript string
+   length.
+3. **Where to cut.** The text is cut only at line ends (`\n`), never at a tab (table cells), and
+   lines are packed greedily; a cut after an empty line is preferred when one lies in the last
+   quarter of a part. A single line longer than a part is cut after the last sentence end (`.`, `!`
+   or `?` followed by whitespace) within its final 2,000 code points, else at the last whitespace,
+   else exactly at the part size; the next part then starts 256 code points earlier, so a value cut
+   in two is seen whole in that overlap.
+4. **Sending.** The parts go out one after another, each as its own freshly encrypted request (a new
+   HPKE context and frame every time; a resent frame is refused as a replay). The entity-type
+   filter and the review-only flag are the same for every part. If the gateway refuses the type
+   filter, the whole text is sent again from the first part without it. A rate-limited part
+   waits as long as `Retry-After` says (5 s when absent), at most three times and at most 60 s
+   each, then is sent again.
+5. **Merging.** The gateway answers each part with code-point offsets into that part. The node
+   converts them to JavaScript (UTF-16) offsets against the exact part it sent, then shifts them by
+   the part's UTF-16 start offset in the whole text. All spans are sorted by start, longer first;
+   exact duplicates (same start, end and type) are dropped, as is a span lying inside a span from
+   another part; two spans from different parts that overlap only partly (a value cut at a part
+   boundary) become their union, so a cut never leaves part of a value in clear. Review-only spans
+   are merged the same way and dropped where they touch a detected value.
+6. **Fail closed.** If any part fails, after the usual retries, the whole item fails as a single
+   request would, and the message says which part (for example "This was part 2 of 3 of the text;
+   no partial result is output."). Nothing from the other parts is used or output.
+7. **Then the local steps run once** over the whole text with the merged spans: placeholders,
+   Additionally Protect, possible IDs and the map. One value keeps one placeholder across every part.
 
 ## Which placeholders to use
 
@@ -381,8 +424,8 @@ any other endpoint.
 | --- | --- | --- |
 | `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process (sooner when the cached copy no longer checks out), plus once more when the gateway rotates its key, one retry after a server error, and one more two seconds later when the gateway is part-way through renewing its signing key (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed key configuration, checked through a signed chain from the root keys built into the node before anything else is sent. |
 | `GET /v1/capabilities` with your API key as `Authorization: Bearer ...` | When Protect or Detect runs with non-blank text, and when the editor loads the **Entity Type Names or IDs** list once a credential is selected (without one the built-in list is shown and nothing is sent); at most once every 5 minutes per n8n process, and after a failed attempt not again for 5 minutes (a rejected API key or a missing credential does not count as an attempt, so it does not hold back other credentials) | No body. The answer is the gateway's signed list of supported entity types, their names and groups, the text limit and the review-only types, checked through the same chain. It can only add types to the node's built-in list; if it cannot be loaded or checked, the built-in list and limit are used and nothing else changes. |
-| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text within the character limit; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key. |
-| Inside the encrypted body | | The **Text** parameter exactly as given; with Selected Types (unless every built-in type is selected), exactly the selected entity types; with **Include Possible IDs**, and only when the gateway's capabilities list review-only types, the flag `"possible": true`. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
+| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text, or once per part for a text longer than the gateway's per-request limit (parts are sent one after another, each encrypted separately; see [Long texts](#long-texts-how-the-node-splits-them)), and once more for a part the gateway rate-limited, after the wait it asks for; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key. |
+| Inside the encrypted body | | The **Text** parameter exactly as given (or, for a long text, one part of it); with Selected Types (unless every built-in type is selected), exactly the selected entity types; with **Include Possible IDs**, and only when the gateway's capabilities list review-only types, the flag `"possible": true`. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
 | In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key. |
 | In the clear, as HTTP headers | | `Content-Type`, `Accept`, `Authorization`, and the standard headers n8n's HTTP helper adds. |
 
@@ -394,8 +437,7 @@ Never sent anywhere:
   inside n8n);
 - ID files;
 - anything **Reveal** reads or writes: Reveal makes no network request and needs no credential;
-- the other fields of the input item, blank text, and text over the character limit (refused before
-  it is encrypted).
+- the other fields of the input item, and blank text.
 
 The gateway answers with entity types, positions and scores (and, when asked, the types and
 positions of review-only spans), encrypted with a key only this request can derive. It returns no
@@ -476,6 +518,9 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
+- **Unreleased:** **Protect** and **Detect** split a text longer than the gateway's per-request
+  limit into parts and analyse them one after another, so there is no length limit per item any
+  more; the node is the reference for API callers ([Long texts](#long-texts-how-the-node-splits-them)).
 - **0.2.0** (2026-10-22): brought in line with the Anonymizator browser extension 2026.10.19.1: the
   gateway's protocol version 2, the entity type list from the gateway's signed capabilities, the
   extension's placeholder prefixes and company names, **Additionally Protect** and **Include

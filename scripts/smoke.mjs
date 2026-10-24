@@ -25,6 +25,7 @@ const DIST = resolve(here, '../dist/nodes/Anonymizator');
 
 const { Anonymizator } = require(`${DIST}/Anonymizator.node.js`);
 const gateway = require(`${DIST}/shared/gateway.js`);
+const chunker = require(`${DIST}/shared/chunker.js`);
 const { NodeApiError, NodeOperationError } = require('n8n-workflow');
 
 function loadApiKey() {
@@ -56,6 +57,7 @@ function redact(value) {
 }
 
 let requestCount = 0;
+let analyzeCount = 0;
 
 /** Stand-in for n8n's `httpRequestWithAuthentication`, mirroring its option handling. */
 function makeHttp(key) {
@@ -66,6 +68,7 @@ function makeHttp(key) {
 			'request bodies must be Buffers',
 		);
 		requestCount++;
+		if (options.method === 'POST') analyzeCount++;
 		const controller = new AbortController();
 		const timer = options.timeout ? setTimeout(() => controller.abort(), options.timeout) : null;
 		let response;
@@ -259,34 +262,62 @@ await scenario('Analyze directly: spans (and possible spans when asked)', async 
 	assert.ok(Array.isArray(result.possible));
 });
 
-await scenario('Text over the local cap is refused before anything is sent', async () => {
-	const before = requestCount;
-	let caught;
-	try {
-		await gateway.analyze(makeContext({}), 'a'.repeat(120001));
-	} catch (error) {
-		caught = error;
-	}
-	assert.equal(caught?.code, 'payload_too_large');
-	assert.equal(requestCount, before);
-});
+await scenario(
+	'Protect a long text (~40 000 characters) in parts: merged, one placeholder per value',
+	async () => {
+		const caps = await gateway.fetchCapabilities(makeContext({}));
+		const cap = gateway.effectiveMaxTextChars(caps);
+		const lines = [];
+		for (let i = 0; lines.join('').length < 40000; i++) {
+			lines.push(
+				i % 7 === 3
+					? `Line ${i}: ${TEXT} 😀\n`
+					: `Line ${i}: the weather report for the coast says sunny spells and light wind. 🌤\n`,
+			);
+		}
+		const text = lines.join('');
+		const parts = chunker.split(text, chunker.partTargetFor(cap));
+		const before = analyzeCount;
+		const started = Date.now();
+		const [out] = await execute(protect(text));
+		const sent = analyzeCount - before;
+		console.log(
+			`${text.length} characters, cap ${cap}, ${parts.length} parts of at most ${chunker.partTargetFor(cap)} code points, ${sent} analyze requests, ${Date.now() - started} ms`,
+		);
+		assert.ok(parts.length >= 3, 'a multi-part text');
+		assert.equal(sent, parts.length, 'one request per part');
+		assert.ok(!out.protectedText.includes(PERSON), 'name replaced everywhere');
+		assert.ok(!out.protectedText.includes(EMAIL), 'email replaced everywhere');
+		const persons = Object.keys(out.placeholderMap).filter((k) => out.placeholderMap[k] === PERSON);
+		const emails = Object.keys(out.placeholderMap).filter((k) => out.placeholderMap[k] === EMAIL);
+		assert.equal(persons.length, 1, 'one placeholder for the name across every part');
+		assert.equal(emails.length, 1, 'one placeholder for the email across every part');
+		assertOffsets(out);
+		const [revealed] = await execute(reveal(out.protectedText, out.placeholderMap));
+		assert.equal(revealed.revealedText, text, 'Reveal restores the whole text');
+	},
+);
 
-await scenario('Protect over the capabilities text cap: refused in n8n, nothing sent', async () => {
-	const cap = gateway.effectiveMaxTextChars(await gateway.fetchCapabilities(makeContext({})));
-	const before = requestCount;
-	let caught;
-	try {
-		await execute(protect('a '.repeat(Math.ceil((cap + 1) / 2))));
-	} catch (error) {
-		caught = error;
-	}
+await scenario('Detect a long text in parts: offsets index the original text', async () => {
+	const text = Array.from({ length: 300 }, (_, i) =>
+		i % 50 === 49
+			? `Line ${i}: ${TEXT}\n`
+			: `Line ${i}: nothing personal here, only filler text. 😀\n`,
+	).join('');
+	const before = analyzeCount;
+	const [out] = await execute({
+		operation: 'detect',
+		text,
+		detect: 'all',
+		options: { includeValues: true },
+	});
 	console.log(
-		`cap ${cap}: ${caught?.constructor.name}: ${caught?.message} / ${caught?.description}`,
+		`${text.length} characters, ${analyzeCount - before} analyze requests, ${out.entityCount} entities`,
 	);
-	assert.ok(caught instanceof NodeOperationError);
-	assert.equal(caught.message, 'The text is too long');
-	assert.ok(caught.description.includes(cap.toLocaleString('en-US')));
-	assert.equal(requestCount, before, 'no request (capabilities are cached)');
+	assert.ok(analyzeCount - before >= 2, 'a multi-part text');
+	for (const e of out.entities) assert.equal(text.slice(e.start, e.end), e.value);
+	assert.ok(out.entities.some((e) => e.value === EMAIL));
+	assert.ok(out.entities.filter((e) => e.value === EMAIL).length >= 5, 'found in every part');
 });
 
 await scenario('Protect, all types, random placeholders', async () => {

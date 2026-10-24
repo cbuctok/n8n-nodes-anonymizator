@@ -26,7 +26,7 @@ import { errorNode, GatewayError } from '../shared/errors';
 import type { ExtraOptions } from '../shared/extraDetect';
 import { analyze, effectiveMaxTextChars, fetchCapabilities } from '../shared/gateway';
 import type { PossibleSpan } from '../shared/gateway';
-import { gatewayErrorText, LOCAL_FAILURES } from '../shared/gatewayMessages';
+import { failedPartText, gatewayErrorText, LOCAL_FAILURES } from '../shared/gatewayMessages';
 import { ignoredTermTest, parseIgnoreTerms } from '../shared/ignoreTerms';
 import { parsePlaceholderMap, toIdFile } from '../shared/placeholderMap';
 import type { ParsedPlaceholderMap } from '../shared/placeholderMap';
@@ -276,9 +276,11 @@ export type GatewayDetection = {
 
 /**
  * The gateway call of Protect and Detect. Blank text never leaves n8n (no request at all).
- * Otherwise the verified capabilities (cached; null on any failure) give the entity list, the text
- * cap and the possible types; `possible: true` is requested only when asked for AND the
- * capabilities list possible types, as the extension does.
+ * Otherwise the verified capabilities (cached; null on any failure) give the entity list, the
+ * per-request text cap and the possible types; `possible: true` is requested only when asked for
+ * AND the capabilities list possible types, as the extension does. A text longer than one request
+ * is sent in parts and the spans come back merged onto the whole text (`analyze`); any failed part
+ * fails the item, so the caller's local steps run once over the whole text or not at all.
  */
 export async function detectRemotely(
 	ctx: IExecuteFunctions,
@@ -301,7 +303,7 @@ export async function detectRemotely(
 			askPossible ? { possible: true, maxTextChars } : { maxTextChars },
 		);
 	} catch (error) {
-		throw gatewayFailure(ctx, error, itemIndex, maxTextChars);
+		throw gatewayFailure(ctx, error, itemIndex);
 	}
 	return {
 		spans: result.spans,
@@ -321,7 +323,6 @@ export function gatewayFailure(
 	ctx: IExecuteFunctions,
 	error: unknown,
 	itemIndex: number,
-	maxTextChars?: number,
 ): NodeApiError | NodeOperationError {
 	const node = errorNode(ctx);
 	if (error instanceof NodeApiError || error instanceof NodeOperationError) return error;
@@ -329,12 +330,14 @@ export function gatewayFailure(
 	if (error instanceof GatewayError) {
 		const text = gatewayErrorText(error.code, {
 			retryAfter: error.retryAfter,
-			maxTextChars,
 			httpCode: error.httpCode,
 		});
 		const parts = [text.description];
 		// Client-side detail only: the gateway layer never keeps server text.
 		if (error.detail) parts.push(error.detail);
+		// A text sent in parts: which part failed (numbers only).
+		const partText = failedPartText(error.failedPart, error.parts);
+		if (partText) parts.push(partText);
 		parts.push(`(code: ${error.code})`);
 		const description = parts.join(' ');
 

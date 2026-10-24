@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+The hosted gateway now accepts at most 14,000 characters per request, so that every request finishes
+within its time budget; clients split longer texts. This node now does, in the same way as the
+Anonymizator web app and browser extension, and is meant as the reference for calling the API
+directly (README, "Long texts: how the node splits them").
+
+### Changed
+
+- **Protect** and **Detect** no longer refuse a long text. A text longer than the gateway's
+  per-request limit is cut at line ends into parts 2,000 characters below that limit (12,000 on the
+  hosted gateway), the parts are analysed one after another, each encrypted separately, and the
+  results are put back together over the whole text, so a value cut at a part boundary is still
+  protected whole and one value keeps one placeholder across all parts. If any part fails, the item
+  fails as a single request would, with no partial output, and the message names the part.
+- A part of a long text that the gateway rate-limits is sent again after the wait the gateway asks
+  for (at most three times, at most 60 seconds each). A short text still stops at once with "Too
+  many requests".
+- The built-in per-request limit, used when the gateway's signed capabilities cannot be loaded or
+  checked, went from 120,000 to 10,000 characters, the smallest limit the node accepts from a
+  gateway, so the node never sends more than a gateway takes.
+- The node waits up to 60 seconds (was 30) for each analysis request, as long as the gateway's CDN
+  does.
+- "The text is too long" became "Part of the text was too long for one request"; it names no limit
+  and no longer tells you to split the text into items.
+
 ## 0.2.0 - 2026-10-22
 
 Brought in line with the Anonymizator browser extension 2026.10.19.1, as listed below.

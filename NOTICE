@@ -28,6 +28,10 @@ with the permission of Prosecco 37 d.o.o. The ported portions are:
   status handling, capabilities), from lib/gateway.js and lib/capabilities.js,
   in nodes/Anonymizator/shared/gateway.ts and
   nodes/Anonymizator/shared/capabilities.ts;
+- the splitting of long texts into parts and the merging of their results,
+  from lib/chunker.js (the same algorithm as the Anonymizator web app's
+  pgw-chunker.js) and the long-text loop of lib/messages.js, in
+  nodes/Anonymizator/shared/chunker.ts and nodes/Anonymizator/shared/gateway.ts;
 - the error wording, from sidepanel/sidepanel-constants.js, in
   nodes/Anonymizator/shared/gatewayMessages.ts;
 - the entity catalog, its merge with the server's capabilities and the entity
