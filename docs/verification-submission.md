@@ -8,7 +8,7 @@ is not part of the npm package (`files` lists only `dist` and `NOTICE`).
 | Field | Value |
 | --- | --- |
 | Package | `n8n-nodes-anonymizator` |
-| Version | `0.2.0`, **pending**: merge the parity work into `dev`, cut it with `npm run release` and approve the staged version on npmjs.com, so it carries a provenance attestation from GitHub Actions. Also the version installed in the video. |
+| Version | `0.3.0` (long texts split into parts), **pending**: approve the staged version on npmjs.com, so it carries a provenance attestation from GitHub Actions. Also the version installed in the video. |
 | Repository | https://github.com/cbuctok/n8n-nodes-anonymizator |
 | Video | `<link>` |
 | Node API version | 1 |
@@ -23,7 +23,7 @@ on is staged by `publish.yml` from a tag.
 
 Before sending, check:
 
-- `npm view n8n-nodes-anonymizator@0.2.0 dist.attestations` is not empty;
+- `npm view n8n-nodes-anonymizator@0.3.0 dist.attestations` is not empty;
 - `npm run smoke` and `npm run n8n:reset && npm run e2e` passed on the tagged commit (they need the
   API key and Docker, so CI cannot run them);
 - the README's Credentials section names where to get a key (TODO(api-key-portal));
@@ -45,7 +45,7 @@ Before sending, check:
 > the Anonymizator browser extension, so ID files move between the two. The list of entity types
 > comes from a document the gateway signs, so installs pick up new types without an update.
 >
-> The video installs version 0.2.0 from npm through **Settings → Community Nodes**, creates the
+> The video installs version 0.3.0 from npm through **Settings → Community Nodes**, creates the
 > credential and runs its test, then runs the example workflow from the repository (Protect, a Basic
 > LLM Chain, Reveal) and shows the round trip. Nothing is loaded from a local folder and nothing is
 > patched on the instance.
@@ -162,7 +162,7 @@ Run on the commit to be tagged:
 
 ## Video outline
 
-1. **Install**: Settings → Community Nodes → Install → `n8n-nodes-anonymizator` (version 0.2.0).
+1. **Install**: Settings → Community Nodes → Install → `n8n-nodes-anonymizator` (version 0.3.0).
    Show the node in the nodes panel (search "PII" or "anonymize").
 2. **Credential**: create an **Anonymizator API** credential, paste the key, save, and show the
    successful test. Optionally show a wrong key giving "API key rejected".
@@ -186,4 +186,4 @@ Run on the commit to be tagged:
 - TODO(api-key-portal): where users and reviewers get an API key (also in the README and the
   credential).
 - TODO(reviewer-key): a working key for the reviewer, and how it is delivered.
-- If the video was recorded against a version other than 0.2.0, correct the version row.
+- If the video was recorded against a version other than 0.3.0, correct the version row.
