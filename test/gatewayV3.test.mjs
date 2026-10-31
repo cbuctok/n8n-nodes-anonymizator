@@ -390,6 +390,60 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 		assert.deepEqual(gw.versions(), [2, 3]);
 	});
 
+	// The credential is saved with post-quantum on while the v2 keyconfig fetch is in flight.
+	function switchOnDuringKeyconfigFetch(gw) {
+		const state = { on: false, reads: 0 };
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			const response = await helper.call(this, name, request);
+			if (request.method === 'GET' && request.url.endsWith('/v1/keyconfig')) state.on = true;
+			return response;
+		};
+		const reader = () => {
+			state.reads += 1;
+			return state.on;
+		};
+		return { state, reader };
+	}
+
+	it('switched on during the v2 keyconfig fetch: the part is sealed as v3, never v2', async () => {
+		const { gw, options } = setup();
+		const { state, reader } = switchOnDuringKeyconfigFetch(gw);
+		await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader });
+		assert.deepEqual(gw.versions(), [3]);
+		assert.equal(gw.posts().length, 1);
+		assert.ok(state.reads >= 2, 'the setting is read again after the v2 acquisition');
+	});
+
+	it('switched on during the v2 keyconfig fetch, server without v3: hpke_pq_unavailable, nothing sent', async () => {
+		const { gw, options } = setup({ offerV3: false });
+		const { reader } = switchOnDuringKeyconfigFetch(gw);
+		await rejects(
+			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader }),
+			'hpke_pq_unavailable',
+		);
+		assert.equal(gw.posts().length, 0);
+	});
+
+	it('switched on during the v2 keyconfig fetch: the restart as v3 spends no retry budget', async () => {
+		// A plain 5xx on the first (v3) send is still retried once.
+		let failV3 = 1;
+		const { gw, options } = setup();
+		const { reader } = switchOnDuringKeyconfigFetch(gw);
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			if (request.method === 'POST' && failV3 > 0) {
+				failV3 -= 1;
+				gw.requests.push(request);
+				return json(503, { error: 'busy' });
+			}
+			return await helper.call(this, name, request);
+		};
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader });
+		assert.deepEqual(r.spans, []);
+		assert.deepEqual(gw.versions(), [3, 3]);
+	});
+
 	it('a reader that throws fails the text and sends nothing (no silent fallback)', async () => {
 		const { gw, options } = setup();
 		await assert.rejects(

@@ -871,6 +871,10 @@ async function analyzeSealed(
 		);
 		refetchKeyconfig = false;
 		if (!kc.ok) return kc;
+		// The v2 acquisition can wait (queue, fetch timeout, below-floor refetch): read the setting
+		// again before sealing, and start over as v3 if it was switched on meanwhile. Spends no
+		// retry budget; the setting only ever turns v2 into v3 here, never the other way.
+		if (!postQuantum && (await postQuantumOn(options))) continue;
 		const sealed = sealFor(kc.publicKey, kc.keyId, payload, options, postQuantum);
 		if (!sealed) return { ok: false, error: 'hpke_seal_failed' };
 		const result = await gatewayFetch(ctx, 'POST', ANALYZE_PATH, sealed.body, {
