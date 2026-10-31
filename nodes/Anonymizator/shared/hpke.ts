@@ -3,7 +3,7 @@
  *
  * Suite: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM. Port of the extension's
  * `lib/hpke.js` using classic synchronous `node:crypto`. There is deliberately no suite
- * negotiation and no protocol v1 (sunset; the extension removed it too).
+ * negotiation and no protocol v1 (removed from the gateway and the extension).
  *
  * Request frame: 0x02 || key_id u32BE || unix seconds u64BE || enc(32) || ct, AAD = the 13-byte
  * prefix, HPKE info = 'pgw request v2', plaintext = JSON padded with spaces to a UTF-8 size bucket.

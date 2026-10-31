@@ -1083,15 +1083,9 @@ describe('keyconfig: trust chain (fail closed, nothing sent)', () => {
 		{ keyId: gw.keyId, pkR: gw.recipient.pkR, notAfter },
 	];
 
-	it('a v1-only keyconfig is not downgraded to: hpke_unverified_keyconfig', async () => {
+	it('a keyconfig without a v2 member: hpke_unverified_keyconfig', async () => {
 		const { gw, options } = setup({
-			keyconfig: () =>
-				json(200, {
-					version: 1,
-					keys: [{ key_id: 1, public_key: 'A'.repeat(43), suite: { kem: 32, kdf: 1, aead: 2 } }],
-					sig_alg: 'ed25519-v1',
-					signature: 'A'.repeat(86),
-				}),
+			keyconfig: () => json(200, { version: 2 }),
 		});
 		const error = await rejects(
 			G.analyze(gw.ctx, 'x', undefined, options),
@@ -1392,8 +1386,6 @@ describe('gatewayMessages', () => {
 		'server_error',
 		'timeout',
 		'offline',
-		'text_too_large',
-		'hpke_bad_keyconfig',
 	];
 
 	it('covers every allowlisted, sealed and client-side code', () => {
@@ -1412,7 +1404,6 @@ describe('gatewayMessages', () => {
 
 	it('local failures are the client-side codes', () => {
 		assert.deepEqual([...M.LOCAL_FAILURES].sort(), [
-			'hpke_bad_keyconfig',
 			'hpke_bad_response',
 			'hpke_no_usable_key',
 			'hpke_seal_failed',

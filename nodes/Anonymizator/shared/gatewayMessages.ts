@@ -80,7 +80,6 @@ export const GATEWAY_MESSAGES: Record<
 			'Try again. Each part of a long text must be answered within 60 s; if the gateway is busy, enable Retry On Fail with a wait between tries, or try again later.',
 	},
 	payload_too_large: TOO_LONG,
-	text_too_large: TOO_LONG,
 	rate_limited: {
 		message: 'Too many requests to the Anonymizator gateway',
 		description:
@@ -102,7 +101,6 @@ export const GATEWAY_MESSAGES: Record<
 		description: `${CLOCK.description} The gateway's signed key configuration looks expired or not yet valid by this clock, so nothing was sent.`,
 	},
 	hpke_unverified_keyconfig: UNVERIFIED_KEY,
-	hpke_bad_keyconfig: UNVERIFIED_KEY,
 	hpke_no_usable_key: {
 		message: "Could not verify the gateway's encryption key, so nothing was sent",
 		description:
@@ -144,7 +142,6 @@ export const LOCAL_FAILURES: ReadonlySet<GatewayErrorCode> = new Set<GatewayErro
 	'hpke_unverified_keyconfig',
 	'hpke_stale_keyconfig',
 	'hpke_no_usable_key',
-	'hpke_bad_keyconfig',
 	'hpke_seal_failed',
 	'hpke_bad_response',
 	'timeout',

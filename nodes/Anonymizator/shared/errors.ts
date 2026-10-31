@@ -97,11 +97,6 @@ export type GatewayErrorCode =
 	| 'timeout'
 	/** The request never reached the gateway (DNS, connection refused, TLS...). */
 	| 'offline'
-	// --- Legacy (protocol v1 era; no longer produced, kept so old mappings still compile) ---
-	/** Replaced by `payload_too_large`. */
-	| 'text_too_large'
-	/** Replaced by `hpke_unverified_keyconfig` (the v2 path has no separate structural code). */
-	| 'hpke_bad_keyconfig'
 	/** Any other status, e.g. `http_404`. */
 	| `http_${number}`;
 

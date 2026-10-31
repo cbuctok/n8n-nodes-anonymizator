@@ -389,7 +389,7 @@ the reference for API callers; keep it in step.
   300 s skew) -> keys with a signed `not_after`. The key used is the **highest `key_id` with
   `now + 300 < not_after`**, never `keys[0]`. Parsers are strict: raw bytes checked before decoding,
   canonical base64url, full-regex numbers, Ed25519 signatures with the S < L check; nothing
-  canonicalises JSON. The top-level v1 fields are never read and there is **no v1 fallback, ever**:
+  canonicalises JSON. Only `v2` is read (the gateway serves `{"version": 2, "v2": ...}`):
   a missing or failing `v2` is `hpke_unverified_keyconfig` (an HTML login page included),
   `hpke_stale_keyconfig` for a time window that does not hold by this clock, `hpke_no_usable_key`
   when no key stays valid long enough. All happen before the text is sealed, and the item stops with
@@ -452,8 +452,8 @@ People rarely update n8n nodes, so plan for installed versions that never update
 - **Suite fixed, no negotiation:** DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM, Base mode,
   single shot (sequence 0 only). HKDF is built from HMAC; an empty HMAC key becomes 32 zero bytes,
   as in the extension (RFC 5869's absent salt), so outputs match byte for byte.
-- **Protocol v2 only.** v1 is sunset and its code is gone from the request path (the extension
-  removed it too). Never add a v1 fallback.
+- **Protocol v2 only.** v1 was removed from the gateway (a `0x01` frame gets `hpke_bad_version`)
+  and from the extension. Never add it back.
 - **Request frame:** `0x02 || key_id u32BE || unix seconds u64BE || enc(32) || ct`, AAD = the 13-byte
   prefix, HPKE `info` = `'pgw request v2'`. Plaintext is `JSON.stringify({ text, entities?,
   possible? })` (UTF-8, no ASCII escaping) padded with spaces to 256 / 1024 / 4096 / 16384 / 65536
@@ -517,9 +517,9 @@ parts. The old 500 ms retry and the "sealed body over 256 KiB" rule are gone.
 New codes since 0.1.1: `hpke_bad_frame`, `hpke_bad_version`, `hpke_key_expired`, `hpke_bad_payload`,
 `hpke_replay`, `hpke_not_configured`, `hpke_bad_key_material`, `payload_too_large`,
 `invalid_payload`, `internal_error`, `busy`, `upstream_unavailable`, `upstream_timeout`,
-`unauthenticated`, `missing_role`, and the client-side `hpke_stale_keyconfig`, `hpke_no_usable_key`
-(`hpke_bad_keyconfig` and `text_too_large` remain in the union and the wording table but are no
-longer produced).
+`unauthenticated`, `missing_role`, and the client-side `hpke_stale_keyconfig`, `hpke_no_usable_key`.
+The protocol-v1 codes `hpke_bad_keyconfig` and `text_too_large` were removed from the union and
+the wording table (a server that still sent one gets the generic `http_<status>` wording).
 
 Local failures (`LOCAL_FAILURES`: the keyconfig codes, `hpke_seal_failed`, `hpke_bad_response`,
 `timeout`, `offline`, and a `payload_too_large` without an HTTP status) become `NodeOperationError`
