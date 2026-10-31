@@ -1,0 +1,4 @@
+HPKE protocol v1 remnants removed (2026-10-31)
+
+The request path was already v2-only (since 0.2.0). Removed v1-era error codes text_too_large and hpke_bad_keyconfig, v1 comments and the v1-keyconfig test; fixtures re-synced from the gateway (52 v2 cases). The retired v1 root stays in a test asserting it is never trusted.
+Tests: npm test 1040 passed; lint, scan, check:fields clean. Not published to npm.
