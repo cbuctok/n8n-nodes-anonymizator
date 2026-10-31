@@ -34,6 +34,8 @@ workflows store them, and the gateway and the browser extension rely on the wire
 | Wire version byte | `0x02` (request and response) | `WIRE_VERSION` in `shared/hpke.ts` |
 | ID file format | `{ format: 'anonymizator-id-file', version: 2 }` written; versions 1 and 2 read | `shared/placeholderMap.ts` |
 | Load-options method | `getEntityTypes` | `methods.loadOptions` in `Anonymizator.node.ts` |
+| EXPERIMENTAL v3 wire strings | `'pgw request v3'`, `'pgw response v3'`, header `pgw-keyconfig-v3`, wire byte `0x03`, suite `25722,1,2` (KEM `0x647a`) | `shared/hpkeV3.ts`, `shared/keyconfigV3.ts` |
+| EXPERIMENTAL credential fields | `showExperimental`, `postQuantum` (both boolean, default `false`) | `credentials/AnonymizatorApi.credentials.ts` |
 
 Parameter names (`operation`, `text`, `detect`, `entityTypes`, `placeholderStyle`, `placeholderMap`,
 and the `options` keys `existingPlaceholderMap`, `shareMapAcrossItems`, `includeIdFile`,
@@ -282,6 +284,12 @@ nodes/Anonymizator/
     hpke.ts                 RFC 9180 seal (Base mode, single shot), v2 frames, padding, response open
     keyconfig.ts            TRUST_ROOTS_B64URL, strict delegation/keyconfig v2 parsers, verifyDelegationV2,
                             verifyKeyconfigV2 (fail closed, key selection)
+    hpkeV3.ts               EXPERIMENTAL protocol v3: X-Wing encapsulation (node:crypto X25519 + vendored
+                            ML-KEM-768), the FIPS 203 key check, the key schedule, sealRequestV3
+    keyconfigV3.ts          EXPERIMENTAL: strict pgw-keyconfig-v3 parser, verifyKeyconfigV3 (the `v3`
+                            member, the same delegation verifier)
+    vendor/noblePq.ts, vendor/noble/*.ts   GENERATED subset of @noble/post-quantum, @noble/hashes and
+                            @noble/curves (TypeScript sources); never edit, regenerate
     capabilities.ts         strict pgw-capabilities-v1 parser, verifyCapabilitiesV1
     gateway.ts              keyconfig acquisition (cache, serial floor), sealed /v1/analyze, long texts
                             in parts (split, sequential parts, rate-limit waits, merge), capabilities
@@ -313,6 +321,8 @@ scripts/
   scan.mjs                  the verification scanner, source + packed tarball
   check-node-fields.mjs     fixedCollection consistency (copied from judgment)
   release.mjs               checks, bump, changelog stub, commit, tag, push
+  vendor-noble-pq.mjs       regenerates shared/vendor/ from the pinned noble tarballs (by hand only)
+vendor-noble.lock.json      provenance of shared/vendor/ (pins, upstream files, patches, outputs); not shipped
 e2e/anonymizator-e2e.workflow.json   19-node workflow with asserting Code nodes
 examples/protect-llm-reveal/         importable example workflow + README (not shipped)
 docs/verification-submission.md      cover note, reviewer notes, video outline (not shipped)
@@ -335,9 +345,12 @@ break offline use and the privacy claim in the README.
 **No runtime dependencies, on purpose.** `nodes/` and `credentials/` import only `n8n-workflow`,
 `node:crypto` and relative paths. The lint rule `no-restricted-imports` also lets any
 **devDependency** through, and that is a trap: the build does not bundle, so such an import passes
-lint and then fails at runtime in the user's n8n. `files` is `["dist", "NOTICE"]`; `npm pack` yields
-75 files, 147 kB (`dist/`, `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm
-always adds). `npm run scan` fails on anything else in the tarball.
+lint and then fails at runtime in the user's n8n. Third-party code that must ship is **vendored as
+source** instead: the experimental protocol v3's ML-KEM-768 and SHA-3 live in
+`shared/vendor/` (see "Experimental: post-quantum protocol v3"), compiled with the rest and scanned
+like our own code. `files` is `["dist", "NOTICE"]`; `npm pack` yields 108 files, 180 kB (`dist/`,
+`NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm always adds; 2026-10-31,
+with the vendored code). `npm run scan` fails on anything else in the tarball.
 
 **Requests go through n8n's helper.** `gateway.ts` calls
 `ctx.helpers.httpRequestWithAuthentication.call(ctx, 'anonymizatorApi', options)` with the context
@@ -613,6 +626,82 @@ production), with `Date.now()` (timers are banned); they live for the n8n proces
   exceeds a cap a server publishes). Lives in `shared/limits.ts` (shared by `gateway.ts` and
   `chunker.ts`) and is re-exported from `gateway.ts`; `partTarget(caps)` = min(that - 2000, 100000).
 - `clearGatewayCaches()` resets all of it (tests).
+
+## Experimental: post-quantum protocol v3
+
+Branch `experimental-pq-v3` only; not released. The specification is the gateway repository's
+`docs/HPKE-V3-EXPERIMENTAL.md` (section 9.3 is this node). v3 is v2 with the hybrid KEM X-Wing
+(X25519 + ML-KEM-768, KEM `0x647a`) instead of DHKEM(X25519): frame `0x03 || key_id || timestamp ||
+enc(1120) || ct` (at least 1149 bytes), the same AAD, padding and response construction with
+`'pgw response v3'`, keys from a sibling `v3` member of `/v1/keyconfig` (`pgw-keyconfig-v3`) signed
+under the same delegation. v2 code paths and bytes are unchanged with the option off (the default).
+
+- **The option is in the credential**, as the last field, shown only with **Show Experimental
+  Options** (`displayOptions`), and on only when both booleans are exactly `true`
+  (`postQuantumEnabled` in `actions/protect.ts`). Why the credential: it is a property of the
+  connection, like the key, it would otherwise appear in both Protect's and Detect's Options and
+  could disagree, and the credential dialog is opened far less often than a node. Reveal has no
+  credential, so the option does not exist where nothing is sent. The credential test stays v2.
+- **Read at every send.** `analyze` takes a `postQuantum` reader and calls it before each send,
+  retry and reseal: on means v3 or nothing (`hpke_pq_unavailable` or the verifier's code), never
+  v2. A run may mix v2 and v3 parts after the option is switched on. A reader that throws fails the
+  item. A context without `getCredentials` (not an n8n execute context) is read as off.
+- **Retries:** v2's (one after `hpke_unknown_key` / `hpke_key_expired` / 5xx / `busy` / sealed
+  `internal_error`), plus, for a v3 frame answered with a plain `hpke_bad_version`, one keyconfig
+  refetch and reseal with its own budget; a second one is `hpke_pq_unavailable`.
+- **Delegation serial floor:** one `commitDelegationFloor` (read, compare, raise) used by the v2
+  and the v3 acquisition, both inside `enqueue('keyconfig')`, so a floor raised by v3 is seen by
+  v2 and capabilities and the other way round. v3 has its own keyconfig cache.
+- **Leak rule:** errors are fixed codes; X-Wing intermediates and secrets are zeroed best effort.
+
+### Vendoring (deviation from the spec's recipe, on purpose)
+
+Section 13.1 of the spec settles an esbuild ESM bundle in a `// @ts-nocheck` `.ts` file, ignored in
+`eslint.config.mjs`. That does not work here: `n8n.strict: true` makes `n8n-node lint` exit 1 when
+`eslint.config.mjs` differs from the CLI's default, and `@ts-nocheck` is itself a lint error
+(`@typescript-eslint/ban-ts-comment`). So `scripts/vendor-noble-pq.mjs` vendors **TypeScript
+sources**: from the `src/*.ts` files inside the three pinned tarballs it keeps exactly the
+declarations reachable from `ml_kem768`, `sha3_256` and `shake256` (TypeScript compiler API; the
+same closure as esbuild's tree shaking, plus types, plus sha3's top-level table loop), one output
+file per upstream module, byte for byte apart from listed patches:
+
+- `randomBytes` throws instead of reading `globalThis.crypto` (banned global; never reached, the
+  node passes ML-KEM's `m` from `node:crypto.randomBytes`);
+- `Object.hasOwn` (ES2022) becomes `Object.prototype.hasOwnProperty.call`;
+- four lint-only edits (`let` -> `const`, an unused parameter and destructured names, `{}` type);
+- type-only: upstream's `any` is spelled `NobleAny` (= `ReturnType<typeof JSON.parse>`).
+
+`vendor-noble.lock.json` records the tarball pins (SHA-256 and npm integrity, checked before
+unpacking), every upstream file's SHA-256 with the declarations kept, the patches with reasons, the
+TypeScript version and each output's SHA-256. Regenerate (by hand, never in a test or build):
+
+```
+mkdir /tmp/noble && cd /tmp/noble && npm pack @noble/post-quantum@0.7.1 @noble/hashes@2.4.0 @noble/curves@2.4.0
+node scripts/vendor-noble-pq.mjs --tarballs /tmp/noble           # check: "up to date"
+node scripts/vendor-noble-pq.mjs --tarballs /tmp/noble --write   # then lint, build, test, scan
+```
+
+`test/vendorNoble.test.mjs` checks the outputs against the lock, the scanner's restricted globals
+and dangerous calls in the source and in `dist/`, and runs a differential test against the
+extension's esbuild bundle of the same tarballs (unmodified upstream) when its experimental
+checkout is present. `@noble/post-quantum` is **not independently audited** (self-audit of 0.6.1);
+re-evaluate 0.6.1 vs 0.7.1 before any release (spec section 18). NOTICE carries the MIT notice;
+`npm run sbom` writes `sbom/vendored.cdx.json` from the lock.
+
+### v3 tests and fixtures
+
+`test/fixtures/pgw-v3.json` and `xwing-official.json` are byte-for-byte copies of the gateway's
+`tests/vectors/` on branch `experimental-pq-v3` at `bd97c6f` (SHA-256 pinned in
+`test/vendorNoble.test.mjs`; `xwing-official.json` transcribes IETF draft text, BSD-3-Clause code
+components). `test/hpkeV3.test.mjs`: the three X-Wing draft-11 vectors and A.5 of
+draft-ietf-hpke-pq-05 (encapsulation included, the key schedule with the AEAD 3 override), every
+section of the shared vectors (frame byte for byte from the fixed `eseed`, responses, exchanges,
+62 keyconfig cases, capabilities, frame and seal cases, `v2_unchanged`). `test/helpers/pgwV3.mjs`
+holds the independent recipient (node:crypto SHA-3/SHAKE/X25519/HKDF; only ML-KEM from the vendored
+code, as node 22 has none), `openRequestForTestV3` (the gateway's pre-open order) and a fake v2 + v3
+gateway. `test/gatewayV3.test.mjs` covers off by default, fail closed, the bad-version budget,
+retries, the monotonic rule and the shared floor; `test/nodeV3.test.mjs` the credential and Protect
+/ Detect end to end. `smoke` and `e2e` do not cover v3 (production serves no `v3` member).
 
 ## Placeholders, maps and the extension
 

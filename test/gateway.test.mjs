@@ -1381,6 +1381,7 @@ describe('gatewayMessages', () => {
 		'hpke_unverified_keyconfig',
 		'hpke_stale_keyconfig',
 		'hpke_no_usable_key',
+		'hpke_pq_unavailable',
 		'hpke_seal_failed',
 		'hpke_bad_response',
 		'server_error',
@@ -1406,6 +1407,7 @@ describe('gatewayMessages', () => {
 		assert.deepEqual([...M.LOCAL_FAILURES].sort(), [
 			'hpke_bad_response',
 			'hpke_no_usable_key',
+			'hpke_pq_unavailable',
 			'hpke_seal_failed',
 			'hpke_stale_keyconfig',
 			'hpke_unverified_keyconfig',

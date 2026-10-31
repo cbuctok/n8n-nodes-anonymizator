@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Added an EXPERIMENTAL, off-by-default credential option, **Post-Quantum Encryption
+  (Experimental)**, shown only after **Show Experimental Options** is turned on. With both on,
+  **Protect** and **Detect** encrypt the text with the gateway's experimental protocol version 3
+  (X-Wing: X25519 and ML-KEM-768) and fail, sending nothing, when the gateway does not offer it,
+  instead of using standard encryption. The ML-KEM-768 and SHA-3 code is a vendored subset of
+  `@noble/post-quantum` 0.7.1 and `@noble/hashes` 2.4.0 (MIT); the package still has no runtime
+  dependencies. Off, nothing changes.
+
 ### Removed
 
 - Removed the error codes `text_too_large` and `hpke_bad_keyconfig`, left over from the gateway's

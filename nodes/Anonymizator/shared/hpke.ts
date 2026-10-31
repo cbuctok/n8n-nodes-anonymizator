@@ -14,6 +14,9 @@
  *   prk    = HKDF-Extract(salt = enc || response_nonce, secret)
  *   key    = HKDF-Expand(prk, 'key', 32), nonce = HKDF-Expand(prk, 'nonce', 12)
  * and an empty AAD. The plaintext is JSON padded with spaces.
+ *
+ * The HKDF, labelled HKDF, AEAD and X25519 helpers are exported, unchanged, for the EXPERIMENTAL
+ * protocol v3 (`hpkeV3.ts`), which shares them.
  */
 import {
 	createCipheriv,
@@ -94,13 +97,13 @@ export type SealedRequest = {
  * HMAC-SHA256. An empty key becomes HashLen zero bytes (RFC 5869: an absent salt is HashLen zeros),
  * which keeps the output identical to the extension's WebCrypto implementation.
  */
-function hmac(key: Buffer, data: Buffer): Buffer {
+export function hmac(key: Buffer, data: Buffer): Buffer {
 	return createHmac('sha256', key.length > 0 ? key : Buffer.alloc(NH))
 		.update(data)
 		.digest();
 }
 
-function hkdfExpand(prk: Buffer, info: Buffer, length: number): Buffer {
+export function hkdfExpand(prk: Buffer, info: Buffer, length: number): Buffer {
 	const out = Buffer.alloc(length);
 	let t: Buffer = EMPTY;
 	let done = 0;
@@ -112,11 +115,11 @@ function hkdfExpand(prk: Buffer, info: Buffer, length: number): Buffer {
 	return out;
 }
 
-function labeledExtract(suiteId: Buffer, salt: Buffer, label: string, ikm: Buffer): Buffer {
+export function labeledExtract(suiteId: Buffer, salt: Buffer, label: string, ikm: Buffer): Buffer {
 	return hmac(salt, Buffer.concat([HPKE_V1, suiteId, Buffer.from(label, 'utf8'), ikm]));
 }
 
-function labeledExpand(
+export function labeledExpand(
 	suiteId: Buffer,
 	prk: Buffer,
 	label: string,
@@ -133,7 +136,7 @@ function labeledExpand(
 	return hkdfExpand(prk, labeledInfo, length);
 }
 
-function privateFromRaw(sk: Buffer): KeyObject {
+export function privateFromRaw(sk: Buffer): KeyObject {
 	return createPrivateKey({
 		key: Buffer.concat([X25519_PKCS8_PREFIX, sk]),
 		format: 'der',
@@ -141,7 +144,7 @@ function privateFromRaw(sk: Buffer): KeyObject {
 	});
 }
 
-function publicFromRaw(pk: Buffer): KeyObject {
+export function publicFromRaw(pk: Buffer): KeyObject {
 	return createPublicKey({
 		key: Buffer.concat([X25519_SPKI_PREFIX, pk]),
 		format: 'der',
@@ -149,18 +152,18 @@ function publicFromRaw(pk: Buffer): KeyObject {
 	});
 }
 
-function rawPublic(publicKeyObject: KeyObject): Buffer {
+export function rawPublic(publicKeyObject: KeyObject): Buffer {
 	const der = publicKeyObject.export({ format: 'der', type: 'spki' });
 	return Buffer.from(der.subarray(der.length - X25519_LENGTH));
 }
 
-function aeadSeal(k: Buffer, nonce: Buffer, aad: Buffer, pt: Buffer): Buffer {
+export function aeadSeal(k: Buffer, nonce: Buffer, aad: Buffer, pt: Buffer): Buffer {
 	const cipher = createCipheriv('aes-256-gcm', k, nonce, { authTagLength: TAG_LENGTH });
 	cipher.setAAD(aad);
 	return Buffer.concat([cipher.update(pt), cipher.final(), cipher.getAuthTag()]);
 }
 
-function aeadOpen(k: Buffer, nonce: Buffer, aad: Buffer, ct: Buffer): Buffer {
+export function aeadOpen(k: Buffer, nonce: Buffer, aad: Buffer, ct: Buffer): Buffer {
 	if (ct.length < TAG_LENGTH) throw new Error('hpke_bad_response');
 	const decipher = createDecipheriv('aes-256-gcm', k, nonce, { authTagLength: TAG_LENGTH });
 	decipher.setAAD(aad);

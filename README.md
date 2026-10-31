@@ -198,6 +198,8 @@ user portal. Paste the key into the credential's **API Key** field.
 | Field | Required | Notes |
 | --- | --- | --- |
 | API Key | Yes | Stored as a password field and sent as a bearer token. Only Protect and Detect use it. |
+| Show Experimental Options | No | Off by default. Shows the experimental option below. |
+| Post-Quantum Encryption (Experimental) | No | Off by default. See [Experimental: post-quantum encryption](#experimental-post-quantum-encryption). |
 
 There is no base URL field: the node always talks to `https://anon.prosecco37.com`, because it only
 trusts encryption keys signed through a chain from the Anonymizator root keys built into the node.
@@ -208,6 +210,23 @@ you save the credential rather than on the first run:
 - **API key rejected**: the key is wrong, expired or revoked.
 - **The key is valid but has no access to Anonymizator (missing role)**: check in the user portal
   that the key belongs to an account with Anonymizator access.
+
+### Experimental: post-quantum encryption
+
+Not for production use. With **Show Experimental Options** and **Post-Quantum Encryption
+(Experimental)** both on, Protect and Detect encrypt the text with the gateway's experimental
+protocol version 3, which adds a post-quantum key exchange (X-Wing: X25519 together with
+ML-KEM-768) to protect recorded traffic against a future quantum computer. Everything else stays
+the same. The protocol, its wire format and this option may change or go away.
+
+- If the gateway does not offer it, the item fails with "Post-quantum encryption is on, but the
+  Anonymizator gateway doesn't offer it, so nothing was sent". The text is **never** sent with
+  standard encryption instead. Turn the option off to use standard encryption.
+- The credential test checks standard encryption only, so it can pass while the option fails.
+- The post-quantum part (ML-KEM-768 and SHA-3) is a vendored copy of the `@noble/post-quantum` and
+  `@noble/hashes` libraries, which have not been independently audited for this use; the X25519
+  part uses Node.js's own crypto, as standard encryption does.
+- Turning **Show Experimental Options** off also turns the option off.
 
 ## Compatibility
 
@@ -426,7 +445,7 @@ any other endpoint.
 | `GET /v1/capabilities` with your API key as `Authorization: Bearer ...` | When Protect or Detect runs with non-blank text, and when the editor loads the **Entity Type Names or IDs** list once a credential is selected (without one the built-in list is shown and nothing is sent); at most once every 5 minutes per n8n process, and after a failed attempt not again for 5 minutes (a rejected API key or a missing credential does not count as an attempt, so it does not hold back other credentials) | No body. The answer is the gateway's signed list of supported entity types, their names and groups, the text limit and the review-only types, checked through the same chain. It can only add types to the node's built-in list; if it cannot be loaded or checked, the built-in list and limit are used and nothing else changes. |
 | `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text, or once per part for a text longer than the gateway's per-request limit (parts are sent one after another, each encrypted separately; see [Long texts](#long-texts-how-the-node-splits-them)), and once more for a part the gateway rate-limited, after the wait it asks for; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key. |
 | Inside the encrypted body | | The **Text** parameter exactly as given (or, for a long text, one part of it); with Selected Types (unless every built-in type is selected), exactly the selected entity types; with **Include Possible IDs**, and only when the gateway's capabilities list review-only types, the flag `"possible": true`. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
-| In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key. |
+| In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key (with the experimental post-quantum option, the 1,120-byte X-Wing key encapsulation instead, and up to one more resend after the gateway answers that it does not accept protocol version 3). |
 | In the clear, as HTTP headers | | `Content-Type`, `Accept`, `Authorization`, and the standard headers n8n's HTTP helper adds. |
 
 Never sent anywhere:
