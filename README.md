@@ -537,6 +537,9 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
+- **Unreleased:** an experimental, off-by-default **Post-Quantum Encryption (Experimental)**
+  credential option behind **Show Experimental Options** (the gateway's protocol version 3, X-Wing;
+  no runtime dependencies); the last remnants of the gateway's protocol v1 removed.
 - **0.3.0** (2026-10-24): **Protect** and **Detect** split a text longer than the gateway's per-request
   limit into parts and analyse them one after another, so there is no length limit per item any
   more; the node is the reference for API callers ([Long texts](#long-texts-how-the-node-splits-them)).
