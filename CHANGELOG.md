@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Updated the development toolchain lockfile: axios 1.18.0 to 1.20.0 (CVE-2026-101898 and six
+  more) and follow-redirects 1.16.1 to 1.16.2 (CVE-2026-116689), through `@n8n/node-cli` 0.52.6
+  and `n8n-workflow` 2.43.5. No change to the published package, which has no runtime
+  dependencies.
+
 ## 0.4.0 - 2026-11-01
 
 ### Added
