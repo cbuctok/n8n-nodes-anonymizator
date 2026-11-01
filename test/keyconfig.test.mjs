@@ -72,8 +72,8 @@ describe('pinned roots', () => {
 });
 
 describe('keyconfig_cases (pgw-v2.json)', () => {
-	it('has 53 cases', () => {
-		assert.equal(VECTORS.keyconfig_cases.length, 53);
+	it('has 52 cases', () => {
+		assert.equal(VECTORS.keyconfig_cases.length, 52);
 	});
 
 	for (const c of VECTORS.keyconfig_cases) {

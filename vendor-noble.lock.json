@@ -1,0 +1,358 @@
+{
+	"format": "n8n-vendor-noble-lock-1",
+	"note": "Provenance of nodes/Anonymizator/shared/vendor/ (EXPERIMENTAL protocol v3; anonymizator docs/HPKE-V3-EXPERIMENTAL.md section 13.1). Rewritten by scripts/vendor-noble-pq.mjs --write; the tarball fields are the pins it checks before unpacking. The vendored files are TypeScript declarations copied from the tarballs' src/*.ts (see the script's header for why not the esbuild bundle). @noble/post-quantum is NOT independently audited (self-audit of 0.6.1, April 2026); @noble/hashes is audited. @noble/ciphers is a declared dependency of @noble/post-quantum but nothing in the ML-KEM closure imports it, so it is not vendored. Never shipped (package.json files).",
+	"packages": [
+		{
+			"name": "@noble/post-quantum",
+			"version": "0.7.1",
+			"license": "MIT",
+			"tarball_url": "https://registry.npmjs.org/@noble/post-quantum/-/post-quantum-0.7.1.tgz",
+			"tarball_file": "noble-post-quantum-0.7.1.tgz",
+			"tarball_sha256": "e98947485ff33c322ce75f8ae32cf7041a510dca9b8135f10475c8c10c956bab",
+			"integrity": "sha512-+P9981IiAnVh+rmcubozzVwrEy3XsN/tMhTnvsjV9VDaYpOnNCqWqKo2FLWxbu92YHfjGIlE5XnW175UK+ln+Q==",
+			"source_files": [
+				{
+					"path": "src/utils.ts",
+					"sha256": "4d257a3f99c8ac0d6e74116086021e125de7d012a827e68af1f0a91b57034a02",
+					"output": "noble/pqUtils.ts",
+					"kept": [
+						"BytesCoder",
+						"BytesCoderLen",
+						"Coder",
+						"CryptoKeys",
+						"KEM",
+						"SplitOut",
+						"TArg",
+						"TRet",
+						"TypedArg",
+						"TypedRet",
+						"UnCoder",
+						"aarray",
+						"abytesDoc",
+						"cleanBytes",
+						"copyBytes",
+						"equalBytes",
+						"getMask",
+						"randomBytes",
+						"splitCoder",
+						"vecCoder"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 11
+				},
+				{
+					"path": "src/_crystals.ts",
+					"sha256": "6fd3e3340618c4da1d1bcde76893beed5ea642274f874e8b25dfea4af13660ec",
+					"output": "noble/pqCrystals.ts",
+					"kept": [
+						"CrystalOpts",
+						"Crystals",
+						"TypedCons",
+						"XOF",
+						"XOF128",
+						"createXofShake",
+						"genCrystals"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 3
+				},
+				{
+					"path": "src/ml-kem.ts",
+					"sha256": "774c5e295b0fc82ceb3999f1f8a37a845fb0a48326a4648c5224b9ea49f0823b",
+					"output": "noble/pqMlKem.ts",
+					"kept": [
+						"BaseCaseMultiply",
+						"F",
+						"KEMParam",
+						"KEMPrepared",
+						"KyberOpts",
+						"MLKEM",
+						"MultiplyNTTs",
+						"N",
+						"PARAMS",
+						"PRF",
+						"Poly",
+						"Q",
+						"ROOT_OF_UNITY",
+						"SampleNTT",
+						"XofGet",
+						"byteCoder",
+						"compress",
+						"createKyber",
+						"crystals",
+						"genKPKE",
+						"mk",
+						"ml_kem768",
+						"opts",
+						"polyAdd",
+						"polyCoder",
+						"polySub",
+						"sampleCBD",
+						"sampleCBDBytes",
+						"shakePRF"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 1
+				}
+			]
+		},
+		{
+			"name": "@noble/hashes",
+			"version": "2.4.0",
+			"license": "MIT",
+			"tarball_url": "https://registry.npmjs.org/@noble/hashes/-/hashes-2.4.0.tgz",
+			"tarball_file": "noble-hashes-2.4.0.tgz",
+			"tarball_sha256": "e1946149b780017b2564fcc092cb01c04e1d7f20627d0296c17da8868f4436dc",
+			"integrity": "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==",
+			"source_files": [
+				{
+					"path": "src/_u64.ts",
+					"sha256": "3dd3e0a061dfedf2fd3a0c622e746b2927c141dcde8045e5f7cbc5df0b758a74",
+					"output": "noble/hashesU64.ts",
+					"kept": [
+						"U32_MASK64",
+						"_32n",
+						"fromBig",
+						"split"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 0
+				},
+				{
+					"path": "src/utils.ts",
+					"sha256": "df2e7c132fb6c451c792dd32dc8a7643de449bcb7782f50fd23664696fbc5962",
+					"output": "noble/hashesUtils.ts",
+					"kept": [
+						"CHash",
+						"CHashXOF",
+						"EmptyObj",
+						"Hash",
+						"HashInfo",
+						"HashXOF",
+						"HasherCons",
+						"TArg",
+						"TRet",
+						"TypedArg",
+						"TypedArray",
+						"TypedRet",
+						"abool",
+						"abytes",
+						"aexists",
+						"anumber",
+						"aobject",
+						"aopts",
+						"aoutput",
+						"atitle",
+						"byteSwap",
+						"byteSwap32",
+						"checkOpts",
+						"clean",
+						"createHasher",
+						"isBytes",
+						"isLE",
+						"oidNist",
+						"randomBytes",
+						"swap32IfBE",
+						"u32"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 14
+				},
+				{
+					"path": "src/sha3.ts",
+					"sha256": "a4a94b8b6755466a6972a3ab7816ec8cb2cabc013c1f4107dd09f235b4815415",
+					"output": "noble/hashesSha3.ts",
+					"kept": [
+						"B",
+						"IOTAS",
+						"Keccak",
+						"SHA3_IOTA_H",
+						"SHA3_IOTA_L",
+						"SHA3_PI",
+						"SHA3_ROTL",
+						"ShakeOpts",
+						"_0n",
+						"_0x71n",
+						"_1n",
+						"_256n",
+						"_2n",
+						"_7n",
+						"_SHA3_IOTA",
+						"genKeccak",
+						"genShake",
+						"keccakP",
+						"rotlBH",
+						"rotlBL",
+						"rotlH",
+						"rotlL",
+						"rotlSH",
+						"rotlSL",
+						"sha3_256",
+						"sha3_512",
+						"shake128",
+						"shake256"
+					],
+					"top_level_statements_kept": 1,
+					"any_rewrites": 0
+				}
+			]
+		},
+		{
+			"name": "@noble/curves",
+			"version": "2.4.0",
+			"license": "MIT",
+			"tarball_url": "https://registry.npmjs.org/@noble/curves/-/curves-2.4.0.tgz",
+			"tarball_file": "noble-curves-2.4.0.tgz",
+			"tarball_sha256": "55279c71b0201d6c0e58d0206d15825359e02a3932f326ba7b7909ac2d334aa9",
+			"integrity": "sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==",
+			"source_files": [
+				{
+					"path": "src/utils.ts",
+					"sha256": "76a892c19902f11aa49a35b9d81c3ca79e961004b892928dce656a87e07f5d83",
+					"output": "noble/curvesUtils.ts",
+					"kept": [
+						"aobject",
+						"validateObject"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 2
+				},
+				{
+					"path": "src/abstract/modular.ts",
+					"sha256": "a369965c957400e86775a946e873fcd13efb1c4936afcd6c40ad22289645e111",
+					"output": null,
+					"kept": [],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 0
+				},
+				{
+					"path": "src/abstract/fft.ts",
+					"sha256": "bcdf6b4e84ac24d94f32eb4b99e7404a6c5f1687835396ae7e2ad8ee2cf4b1ad",
+					"output": "noble/curvesFft.ts",
+					"kept": [
+						"FFTCore",
+						"FFTCoreLoop",
+						"FFTCoreOpts",
+						"FFTOpts",
+						"MutableArrayLike",
+						"Polynomial",
+						"bitReversalInplace",
+						"checkU32",
+						"isPowerOfTwo",
+						"log2",
+						"reverseBits"
+					],
+					"top_level_statements_kept": 0,
+					"any_rewrites": 3
+				}
+			]
+		}
+	],
+	"generator": {
+		"script": "scripts/vendor-noble-pq.mjs",
+		"typescript": "5.9.3",
+		"roots": [
+			"@noble/post-quantum:ml-kem#ml_kem768",
+			"@noble/hashes:sha3#sha3_256",
+			"@noble/hashes:sha3#shake256"
+		],
+		"patches": [
+			{
+				"module": "@noble/hashes:utils",
+				"reason": "n8n's verification scanner forbids the global `globalThis` (no-restricted-globals, also on dist/). randomBytes is never reached: the node always passes the ML-KEM randomness `m` from node:crypto.randomBytes (HPKE-V3-EXPERIMENTAL.md section 4). It throws instead, as the spec's --define:globalThis=undefined bundle would.",
+				"find": "  const cr = typeof globalThis === 'object' ? (globalThis as any).crypto : null;\n  if (typeof cr?.getRandomValues !== 'function')\n    throw new Error('crypto.getRandomValues must be defined');\n  // Web Cryptography API Level 2 §10.1.1:\n  // if `byteLength > 65536`, throw `QuotaExceededError`.\n  // Keep the guard explicit so callers can see the quota in code\n  // instead of discovering it by reading the spec or host errors.\n  // This wrapper surfaces the same quota as a stable library RangeError.\n  if (bytesLength > 65536)\n    throw new RangeError(`\"bytesLength\" expected <= 65536, got ${bytesLength}`);\n  return cr.getRandomValues(new Uint8Array(bytesLength));\n",
+				"replace": "  // n8n vendoring: no platform CSPRNG here (globalThis is banned in n8n nodes). Callers\n  // always pass their randomness explicitly, so this is never reached.\n  throw new Error('randomBytes is not available in the vendored subset');\n"
+			},
+			{
+				"module": "@noble/hashes:utils",
+				"reason": "Object.hasOwn is ES2022; the project compiles against lib es2019/es2020 (tsconfig.json is the n8n CLI template's and must not change). Same semantics.",
+				"find": "      !Object.hasOwn(object, fieldName) &&",
+				"replace": "      !Object.prototype.hasOwnProperty.call(object, fieldName) &&"
+			},
+			{
+				"module": "@noble/hashes:utils",
+				"reason": "As above (Object.hasOwn is ES2022).",
+				"find": "  if (Object.hasOwn(value, '__proto__'))",
+				"replace": "  if (Object.prototype.hasOwnProperty.call(value, '__proto__'))"
+			},
+			{
+				"module": "@noble/curves:utils",
+				"reason": "As above (Object.hasOwn is ES2022).",
+				"find": "      !Object.hasOwn(object, fieldName) &&",
+				"replace": "      !Object.prototype.hasOwnProperty.call(object, fieldName) &&"
+			},
+			{
+				"module": "@noble/hashes:_u64",
+				"reason": "prefer-const (lint). Never reassigned, so const is the same program.",
+				"find": "  let Ah = new Uint32Array(len);\n  let Al = new Uint32Array(len);\n",
+				"replace": "  const Ah = new Uint32Array(len);\n  const Al = new Uint32Array(len);\n"
+			},
+			{
+				"module": "@noble/hashes:utils",
+				"reason": "@typescript-eslint/no-empty-object-type (lint). Type only: NonNullable<unknown> is {}.",
+				"find": "type EmptyObj = {};\n",
+				"replace": "type EmptyObj = NonNullable<unknown>;\n"
+			},
+			{
+				"module": "@noble/post-quantum:_crystals",
+				"reason": "@typescript-eslint/no-unused-vars (lint). The stub ignores its argument either way; callers still type-check against the field type.",
+				"find": "  const inv = (_a: number) => {\n",
+				"replace": "  const inv = () => {\n"
+			},
+			{
+				"module": "@noble/post-quantum:ml-kem",
+				"reason": "@typescript-eslint/no-unused-vars (lint). Array holes skip the same elements; the decode call and its checks are unchanged.",
+				"find": "      const [_sk, publicKey, _publicKeyHash, _z] = secretCoder.decode(secretKey);\n",
+				"replace": "      const [, publicKey] = secretCoder.decode(secretKey);\n"
+			}
+		],
+		"type_rewrite": "every `any` type in a kept declaration is spelled NobleAny, declared per file as: // n8n vendoring: upstream's `any`, spelled without the keyword (type only; see the lock).\ntype NobleAny = ReturnType<typeof JSON.parse>;"
+	},
+	"outputs": [
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/curvesFft.ts",
+			"sha256": "e11bec674eea3949895a5303809b00e030a920345ca44d22ec7d6a38b94db498",
+			"bytes": 11293
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/curvesUtils.ts",
+			"sha256": "62f5944987da96404ef5cb824fa6e58000a9df76adb4bb58cf3ead4fab30236a",
+			"bytes": 3536
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/hashesSha3.ts",
+			"sha256": "e36a2a816c64a79d60ac022e9b385da366ada7d366851473212cee5db9d1b262",
+			"bytes": 14691
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/hashesU64.ts",
+			"sha256": "bb2dc9390ae4d58355e5b03a267065c7196ed633b344a41a0f6e7ffee7eaec3a",
+			"bytes": 1454
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/hashesUtils.ts",
+			"sha256": "78d5adeacd77f1f4852df210295a85461555cda9eca2b1735d370d9cbc73ac25",
+			"bytes": 21487
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/pqCrystals.ts",
+			"sha256": "90c9b903c835f0facafdb29262ba849b58ea720ad71d82e86181768aa9ff647a",
+			"bytes": 11439
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/pqMlKem.ts",
+			"sha256": "35aac58019db3a2102ca4dba60ceebe64de1adcdb255fbfc3784fc8317bc1fa1",
+			"bytes": 26767
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noble/pqUtils.ts",
+			"sha256": "c337e50f5357a3321cda4677fd0c7f143d23042cfb49dd4c0bd9cadbe26feaa0",
+			"bytes": 15814
+		},
+		{
+			"path": "nodes/Anonymizator/shared/vendor/noblePq.ts",
+			"sha256": "157de5681303398a62c82923a2fb43b808016be205fa4033206d17283860a810",
+			"bytes": 366
+		}
+	]
+}

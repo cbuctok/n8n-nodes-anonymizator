@@ -38,3 +38,36 @@ with the permission of Prosecco 37 d.o.o. The ported portions are:
   filter, from lib/entities.js, in nodes/Anonymizator/shared/entities.ts;
 - the ID file format (versions 1 and 2) and its parse rules, from
   sidepanel/sidepanel-idfile.js, in nodes/Anonymizator/shared/placeholderMap.ts.
+
+Third-party code (EXPERIMENTAL post-quantum encryption, protocol v3)
+
+nodes/Anonymizator/shared/vendor/ (compiled to dist/nodes/Anonymizator/shared/
+vendor/) contains a subset of the TypeScript sources of @noble/post-quantum
+0.7.1, @noble/hashes 2.4.0 and @noble/curves 2.4.0 (ML-KEM-768, SHA-3 and
+SHAKE), taken from the npm tarballs with the edits listed in
+vendor-noble.lock.json in the source repository. They are used only when the
+credential's experimental Post-Quantum Encryption option is on.
+
+@noble/post-quantum: Copyright (c) 2024 Paul Miller (https://paulmillr.com)
+@noble/hashes:       Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+@noble/curves:       Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+
+The MIT License (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

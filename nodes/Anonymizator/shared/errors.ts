@@ -87,6 +87,12 @@ export type GatewayErrorCode =
 	| 'hpke_stale_keyconfig'
 	/** The verified keyconfig lists no key valid for long enough. */
 	| 'hpke_no_usable_key'
+	/**
+	 * EXPERIMENTAL protocol v3: post-quantum encryption is on in the credential, but the gateway
+	 * offers no `v3` keyconfig member (or answered a v3 frame twice with `hpke_bad_version`).
+	 * Nothing was sent as v2 instead.
+	 */
+	| 'hpke_pq_unavailable'
 	/** Sealing the request failed. */
 	| 'hpke_seal_failed'
 	/** The response could not be opened, parsed or classified, or a span lies outside the text. */
@@ -97,11 +103,6 @@ export type GatewayErrorCode =
 	| 'timeout'
 	/** The request never reached the gateway (DNS, connection refused, TLS...). */
 	| 'offline'
-	// --- Legacy (protocol v1 era; no longer produced, kept so old mappings still compile) ---
-	/** Replaced by `payload_too_large`. */
-	| 'text_too_large'
-	/** Replaced by `hpke_unverified_keyconfig` (the v2 path has no separate structural code). */
-	| 'hpke_bad_keyconfig'
 	/** Any other status, e.g. `http_404`. */
 	| `http_${number}`;
 

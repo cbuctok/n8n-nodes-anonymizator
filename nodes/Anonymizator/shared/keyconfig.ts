@@ -2,8 +2,7 @@
  * Gateway keyconfig v2 (docs/HPKE.md in the gateway repository, "Keyconfig"): the trust chain
  * pinned root -> root-signed delegation -> keyconfig signed by the delegated key -> HPKE keys with a
  * signed expiry. Port of `verifyDelegationV2` / `verifyKeyconfigV2` and their strict parsers from the
- * extension's `lib/hpke.js`. Fails closed; there is no v1 fallback (a response without `v2` is
- * refused, never downgraded).
+ * extension's `lib/hpke.js`. Fails closed: a response without `v2` is refused.
  *
  * Both documents are ASCII byte strings, `name=value` lines in a fixed order, one LF after every
  * line. The bytes are checked before any decoding, numbers and base64url are matched with full
@@ -320,8 +319,8 @@ export function verifyDelegationV2(
 
 /**
  * Verifies the `v2` member of a /v1/keyconfig response (verification steps 1-11) and selects the
- * key: the highest key_id still valid for KEY_EXPIRY_MARGIN_S, never `keys[0]`. The top-level v1
- * fields are never read. The delegation serial floor (step 12) is the caller's.
+ * key: the highest key_id still valid for KEY_EXPIRY_MARGIN_S, never `keys[0]`. Only the `v2`
+ * member is read. The delegation serial floor (step 12) is the caller's.
  *
  * @param config parsed /v1/keyconfig JSON
  * @param pinnedRoots trusted root public keys (base64url); empty -> nothing verifies

@@ -30,6 +30,14 @@
  * - plain-JSON codes pass an allowlist (`KNOWN_ERROR_CODES`), sealed ones `SEALED_ERROR_CODES`;
  *   server text (`detail`, `error_description`) is never kept.
  *
+ * EXPERIMENTAL protocol v3 (post-quantum, X-Wing; gateway docs/HPKE-V3-EXPERIMENTAL.md): when the
+ * caller's `postQuantum` reader says on AT THE TIME OF A SEND (it is read before every send,
+ * including every retry), that send is sealed as v3 to a key from the verified `v3` keyconfig
+ * member, or the part fails (`hpke_pq_unavailable` or the verifier's code). It is never sent as v2
+ * instead. A v3 frame answered with a plain `hpke_bad_version` gets one keyconfig refetch and one
+ * reseal per part (its own budget); a second one is `hpke_pq_unavailable`. Without a reader, or with
+ * it off, nothing of v3 runs and every request is v2, byte for byte as before.
+ *
  * Lint note: nothing is thrown lexically inside a `catch` (scanner rule require-node-api-error);
  * failures are recorded in a variable and thrown after the catch.
  */
@@ -45,7 +53,9 @@ import { merge, partTargetFor, split, type TextPart } from './chunker';
 import { GatewayError, type GatewayErrorCode } from './errors';
 import { gatewayErrorText } from './gatewayMessages';
 import { sealRequestV2, type SealedRequest, type TestEphemeral } from './hpke';
+import { sealRequestV3 } from './hpkeV3';
 import { TRUST_ROOTS_B64URL, verifyKeyconfigV2, type KeyconfigVerification } from './keyconfig';
+import { verifyKeyconfigV3, type VerifiedKeyconfigV3 } from './keyconfigV3';
 import { MAX_TEXT_CHARS } from './limits';
 import { CREDENTIAL_NAME, GATEWAY_BASE_URL, GATEWAY_TIMEOUT_MS, type Span } from './types';
 
@@ -88,6 +98,8 @@ export type GatewayTestSeams = {
 	retryAfterSecondMs?: number;
 	/** Fixed ephemeral key (test vectors only: reusing it reuses the AES-GCM key and nonce). */
 	testEphemeral?: TestEphemeral;
+	/** Fixed 64-byte X-Wing `eseed` for protocol v3 (test vectors only, as `testEphemeral`). */
+	testEseed?: Buffer;
 };
 
 export type AnalyzeOptions = {
@@ -98,6 +110,12 @@ export type AnalyzeOptions = {
 	 * A longer text is sent in parts of `partTargetFor(maxTextChars)` code points.
 	 */
 	maxTextChars?: number;
+	/**
+	 * EXPERIMENTAL: whether post-quantum encryption (protocol v3) is on, read before EVERY send
+	 * (every part, retry and reseal). Only `true` is on. A reader that throws fails the text (no
+	 * silent fallback). Omitted: off, every request is v2.
+	 */
+	postQuantum?: () => boolean | Promise<boolean>;
 } & GatewayTestSeams;
 
 /** One review-only span: never substituted, only listed. UTF-16 offsets into the original text. */
@@ -195,11 +213,14 @@ type CapabilitiesCacheEntry = {
 };
 
 const keyconfigCache = new Map<string, KeyconfigCacheEntry>();
+/** EXPERIMENTAL protocol v3: the raw /v1/keyconfig JSON whose `v3` member verified. */
+const keyconfigV3Cache = new Map<string, KeyconfigCacheEntry>();
 const capabilitiesCache = new Map<string, CapabilitiesCacheEntry>();
 /**
  * The highest delegation serial that ever verified: a delegation below it is refused, so a stolen
  * older delegated key cannot be replayed once the renewal was seen. Never lowered; only a
- * successful keyconfig acquisition raises it (capabilities only read it).
+ * successful keyconfig acquisition raises it, v2 or v3 alike, through `commitDelegationFloor`
+ * (capabilities only read it). The floor belongs to the delegation, which v2 and v3 share.
  */
 const delegationFloors = new Map<string, number>();
 // One keyconfig acquisition (and one capabilities refresh) at a time in this process.
@@ -209,6 +230,7 @@ let capabilitiesQueue: Promise<unknown> = Promise.resolve();
 /** Empties every module-level cache and the serial floors (tests). */
 export function clearGatewayCaches(): void {
 	keyconfigCache.clear();
+	keyconfigV3Cache.clear();
 	capabilitiesCache.clear();
 	delegationFloors.clear();
 }
@@ -496,17 +518,49 @@ function gatewayError(failure: FetchFailure): GatewayError {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Keyconfig v2
+// Keyconfig (v2, and the EXPERIMENTAL v3 member through the same acquisition)
 
-type KeyconfigResult =
-	Extract<KeyconfigVerification, { ok: true }> | (FetchFailure & { belowFloor?: boolean });
+/** What a keyconfig acquisition yields: the selected key and the delegation serial. */
+type VerifiedKey = {
+	ok: true;
+	keyId: number;
+	publicKey: Buffer;
+	issuedAt: number;
+	serial: number;
+	notAfter: number;
+};
+
+type KeyconfigResult = VerifiedKey | (FetchFailure & { belowFloor?: boolean });
+
+/** One protocol's view of /v1/keyconfig: its own cache of the raw JSON and its own verifier. */
+type KeyconfigFlavor = {
+	cache: Map<string, KeyconfigCacheEntry>;
+	verify: (
+		config: unknown,
+		options: GatewayTestSeams | undefined,
+	) => VerifiedKey | { ok: false; error: GatewayErrorCode };
+};
+
+const V2_KEYCONFIG: KeyconfigFlavor = {
+	cache: keyconfigCache,
+	verify: (config, options) =>
+		verifyKeyconfigV2(config, roots(options), nowSeconds(options), EXPECTED_AUDIENCE),
+};
+
+/** EXPERIMENTAL protocol v3: only the `v3` member is read (never `v2`). */
+const V3_KEYCONFIG: KeyconfigFlavor = {
+	cache: keyconfigV3Cache,
+	verify: (config, options) =>
+		verifyKeyconfigV3(config, roots(options), nowSeconds(options), EXPECTED_AUDIENCE),
+};
 
 function verifyConfig(
+	flavor: KeyconfigFlavor,
 	config: unknown,
 	floor: number,
 	options: GatewayTestSeams | undefined,
-): KeyconfigVerification | { ok: false; error: GatewayErrorCode; belowFloor: true } {
-	const result = verifyKeyconfigV2(config, roots(options), nowSeconds(options), EXPECTED_AUDIENCE);
+): VerifiedKey | { ok: false; error: GatewayErrorCode; belowFloor?: true } {
+	const result = flavor.verify(config, options);
 	if (!result.ok) return result;
 	if (result.serial < floor) {
 		return { ok: false, error: 'hpke_unverified_keyconfig', belowFloor: true };
@@ -515,36 +569,48 @@ function verifyConfig(
 }
 
 /**
+ * The one read-compare-raise of the delegation serial floor, shared by the v2 and v3 acquisitions
+ * (both run inside `enqueue('keyconfig')`, so they never race): re-read the floor, refuse a serial
+ * below it, raise it to a higher one, never lower it. Returns whether `serial` may be used.
+ */
+function commitDelegationFloor(key: string, serial: number): boolean {
+	const floor = delegationFloors.get(key) ?? 0;
+	if (serial < floor) return false;
+	if (serial > floor) delegationFloors.set(key, serial);
+	return true;
+}
+
+/**
  * Remembers a freshly fetched config that verified and raises the floor. If the floor rose above
  * this config's serial meanwhile, nothing is stored and the caller treats it as below the floor.
  */
 function storeConfig(
+	flavor: KeyconfigFlavor,
 	key: string,
 	config: unknown,
 	serial: number,
 	options: GatewayTestSeams | undefined,
 ): boolean {
-	const floor = delegationFloors.get(key) ?? 0;
-	if (serial < floor) return false;
-	if (serial > floor) delegationFloors.set(key, serial);
-	keyconfigCache.set(key, { config, fetchedAt: nowMs(options) });
+	if (!commitDelegationFloor(key, serial)) return false;
+	flavor.cache.set(key, { config, fetchedAt: nowMs(options) });
 	return true;
 }
 
 async function acquireKeyconfigOnce(
 	ctx: GatewayContext,
+	flavor: KeyconfigFlavor,
 	force: boolean,
 	options: GatewayTestSeams | undefined,
 ): Promise<KeyconfigResult> {
 	const key = stateKey(options);
 	const floor = delegationFloors.get(key) ?? 0;
-	const cached = keyconfigCache.get(key);
+	const cached = flavor.cache.get(key);
 	if (!force && cached && nowMs(options) - cached.fetchedAt < KEYCONFIG_TTL_MS) {
 		// Never trusted as stored: re-verified on every use.
-		const verified = verifyConfig(cached.config, floor, options);
+		const verified = verifyConfig(flavor, cached.config, floor, options);
 		if (verified.ok) return verified;
 		// Expired or otherwise no longer valid: drop it and fetch once.
-		keyconfigCache.delete(key);
+		flavor.cache.delete(key);
 	}
 
 	for (let attempt = 1; ; attempt++) {
@@ -555,8 +621,8 @@ async function acquireKeyconfigOnce(
 		if (!result.ok) return result;
 		// A 200 that is sealed is not a keyconfig.
 		const config = result.sealed ? {} : result.data;
-		const verified = verifyConfig(config, floor, options);
-		if (verified.ok && storeConfig(key, config, verified.serial, options)) return verified;
+		const verified = verifyConfig(flavor, config, floor, options);
+		if (verified.ok && storeConfig(flavor, key, config, verified.serial, options)) return verified;
 		if (!verified.ok && !('belowFloor' in verified)) {
 			return { ok: false, status: result.status, error: verified.error };
 		}
@@ -565,7 +631,7 @@ async function acquireKeyconfigOnce(
 		// floor; else ask again once, a little later.
 		const current = delegationFloors.get(key) ?? 0;
 		if (cached) {
-			const previous = verifyConfig(cached.config, current, options);
+			const previous = verifyConfig(flavor, cached.config, current, options);
 			if (previous.ok) return previous;
 		}
 		if (attempt >= 2) {
@@ -579,8 +645,9 @@ function acquireKeyconfigResult(
 	ctx: GatewayContext,
 	force: boolean,
 	options: GatewayTestSeams | undefined,
+	flavor: KeyconfigFlavor = V2_KEYCONFIG,
 ): Promise<KeyconfigResult> {
-	return enqueue('keyconfig', async () => await acquireKeyconfigOnce(ctx, force, options));
+	return enqueue('keyconfig', async () => await acquireKeyconfigOnce(ctx, flavor, force, options));
 }
 
 /**
@@ -593,6 +660,20 @@ export async function acquireKeyconfig(
 	options?: GatewayTestSeams & { force?: boolean },
 ): Promise<Extract<KeyconfigVerification, { ok: true }>> {
 	const result = await acquireKeyconfigResult(ctx, options?.force === true, options);
+	if (!result.ok) throw gatewayError(result);
+	return result;
+}
+
+/**
+ * EXPERIMENTAL protocol v3: the verified X-Wing key from the `v3` member, as `acquireKeyconfig`
+ * (same queue, same delegation serial floor, its own cache). Throws GatewayError, with
+ * `hpke_pq_unavailable` when the gateway offers no `v3` member. For diagnostics and tests.
+ */
+export async function acquireKeyconfigV3(
+	ctx: GatewayContext,
+	options?: GatewayTestSeams & { force?: boolean },
+): Promise<VerifiedKeyconfigV3> {
+	const result = await acquireKeyconfigResult(ctx, options?.force === true, options, V3_KEYCONFIG);
 	if (!result.ok) throw gatewayError(result);
 	return result;
 }
@@ -729,12 +810,21 @@ function sealFor(
 	keyId: number,
 	payload: Record<string, unknown>,
 	options: AnalyzeOptions | undefined,
+	postQuantum = false,
 ): SealedRequest | undefined {
 	try {
-		return sealRequestV2(publicKey, keyId, payload, options?.nowSeconds, options?.testEphemeral);
+		return postQuantum
+			? sealRequestV3(publicKey, keyId, payload, options?.nowSeconds, options?.testEseed)
+			: sealRequestV2(publicKey, keyId, payload, options?.nowSeconds, options?.testEphemeral);
 	} catch {
 		return undefined;
 	}
+}
+
+/** EXPERIMENTAL: whether this send is post-quantum (v3). Only an explicit `true` is on. */
+async function postQuantumOn(options: AnalyzeOptions | undefined): Promise<boolean> {
+	if (typeof options?.postQuantum !== 'function') return false;
+	return (await options.postQuantum()) === true;
 }
 
 /**
@@ -747,9 +837,10 @@ function codePointLength(text: string): number {
 
 /**
  * Seal {text[, entities][, possible]}, POST it, open the sealed answer (`analyzeSealed`): ONE
- * request's worth of text (one part). At most two HTTP attempts, each with a FRESH seal. A text over
- * the per-request cap (code points) is refused before anything is sealed; the chunker keeps every
- * part below it, so this is only a guard.
+ * request's worth of text (one part). At most two HTTP attempts, each with a FRESH seal (three with
+ * post-quantum on, whose bad-version reseal has its own budget). A text over the per-request cap
+ * (code points) is refused before anything is sealed; the chunker keeps every part below it, so
+ * this is only a guard.
  */
 async function analyzeSealed(
 	ctx: GatewayContext,
@@ -766,10 +857,25 @@ async function analyzeSealed(
 	if (wantPossible) payload.possible = true;
 
 	let refetchKeyconfig = false;
-	for (let attempt = 1; attempt <= 2; attempt++) {
-		const kc = await acquireKeyconfigResult(ctx, refetchKeyconfig, options);
+	// The one retry (rotation, server error) and, for v3 only, the one bad-version reseal.
+	let retried = false;
+	let badVersionResealed = false;
+	for (;;) {
+		// Read at every send: post-quantum on now means v3 or nothing, never v2.
+		const postQuantum = await postQuantumOn(options);
+		const kc = await acquireKeyconfigResult(
+			ctx,
+			refetchKeyconfig,
+			options,
+			postQuantum ? V3_KEYCONFIG : V2_KEYCONFIG,
+		);
+		refetchKeyconfig = false;
 		if (!kc.ok) return kc;
-		const sealed = sealFor(kc.publicKey, kc.keyId, payload, options);
+		// The v2 acquisition can wait (queue, fetch timeout, below-floor refetch): read the setting
+		// again before sealing, and start over as v3 if it was switched on meanwhile. Spends no
+		// retry budget; the setting only ever turns v2 into v3 here, never the other way.
+		if (!postQuantum && (await postQuantumOn(options))) continue;
+		const sealed = sealFor(kc.publicKey, kc.keyId, payload, options, postQuantum);
 		if (!sealed) return { ok: false, error: 'hpke_seal_failed' };
 		const result = await gatewayFetch(ctx, 'POST', ANALYZE_PATH, sealed.body, {
 			retryServerErrors: false,
@@ -799,8 +905,18 @@ async function analyzeSealed(
 			plainStatus = result.status;
 		}
 
-		if (attempt === 2) return failure;
+		if (postQuantum && plainStatus !== undefined && failure.error === 'hpke_bad_version') {
+			// v3 switched off since the keyconfig was fetched, or replicas disagree during a
+			// restart: refetch once and reseal once (a refetch without `v3` ends in
+			// hpke_pq_unavailable). A second one ends the part. Never resent as v2.
+			if (badVersionResealed) return { ...failure, error: 'hpke_pq_unavailable' };
+			badVersionResealed = true;
+			refetchKeyconfig = true;
+			continue;
+		}
+		if (retried) return failure;
 		if (failure.error === 'hpke_unknown_key' || failure.error === 'hpke_key_expired') {
+			retried = true;
 			refetchKeyconfig = true; // rotated under us
 			continue;
 		}
@@ -809,12 +925,12 @@ async function analyzeSealed(
 			failure.error === 'busy' ||
 			failure.error === 'internal_error'
 		) {
+			retried = true;
 			await sleep(options?.retryDelayMs ?? ANALYZE_RETRY_DELAY_MS);
 			continue;
 		}
 		return failure;
 	}
-	return { ok: false, error: 'server_error' };
 }
 
 /**

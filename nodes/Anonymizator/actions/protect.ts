@@ -266,6 +266,21 @@ export function readEntityTypes(
 // ---------------------------------------------------------------------------------------------
 // Gateway
 
+/**
+ * EXPERIMENTAL: whether the credential turns post-quantum encryption (protocol v3) on. Only when
+ * both `showExperimental` and `postQuantum` are exactly `true`, so hiding the experimental options
+ * also turns it off, and a credential saved before the fields existed is off. Read before every
+ * send (the gateway layer calls it per request). A credential read that throws fails the item, as
+ * any request with that credential would; no silent fallback to standard encryption.
+ */
+export async function postQuantumEnabled(ctx: IExecuteFunctions): Promise<boolean> {
+	// n8n's execute contexts always have getCredentials (FunctionsBase); a stand-in context without
+	// it cannot hold the experimental setting at all.
+	if (typeof ctx.getCredentials !== 'function') return false;
+	const credentials = (await ctx.getCredentials(CREDENTIAL_NAME)) as Record<string, unknown>;
+	return credentials.showExperimental === true && credentials.postQuantum === true;
+}
+
 /** What `detectRemotely` returns: the gateway's findings for one item. */
 export type GatewayDetection = {
 	spans: Span[];
@@ -294,13 +309,14 @@ export async function detectRemotely(
 	const possibleTypes = new Set((caps?.possible ?? []).map((p) => p.type));
 	const askPossible = wantPossible && possibleTypes.size > 0;
 	const maxTextChars = effectiveMaxTextChars(caps);
+	const postQuantum = () => postQuantumEnabled(ctx);
 	let result;
 	try {
 		result = await analyze(
 			ctx,
 			text,
 			entityTypes,
-			askPossible ? { possible: true, maxTextChars } : { maxTextChars },
+			askPossible ? { possible: true, maxTextChars, postQuantum } : { maxTextChars, postQuantum },
 		);
 	} catch (error) {
 		throw gatewayFailure(ctx, error, itemIndex);

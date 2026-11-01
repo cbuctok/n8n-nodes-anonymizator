@@ -34,6 +34,26 @@ export class AnonymizatorApi implements ICredentialType {
 			description:
 				'Anonymizator API key, created and managed in the Prosecco 37 Anonymizator user portal. The node sends it as a bearer token to the privacy gateway; only Protect uses it.',
 		},
+		// EXPERIMENTAL (gateway docs/HPKE-V3-EXPERIMENTAL.md, section 9.3). Kept last and behind a
+		// gate on purpose: it is a property of the connection (how the text is encrypted to the
+		// gateway), so it belongs here rather than in every node's options, and the credential
+		// dialog is opened far less often. Post-quantum is on only when BOTH booleans are true.
+		{
+			displayName: 'Show Experimental Options',
+			name: 'showExperimental',
+			type: 'boolean',
+			default: false,
+			description: 'Whether to show options that are experimental and may change or go away',
+		},
+		{
+			displayName: 'Post-Quantum Encryption (Experimental)',
+			name: 'postQuantum',
+			type: 'boolean',
+			default: false,
+			displayOptions: { show: { showExperimental: [true] } },
+			description:
+				"Whether to seal requests with the experimental post-quantum protocol (X-Wing). Protect and Detect fail instead of using standard encryption when the gateway doesn't offer it. The connection test checks standard encryption only.",
+		},
 	];
 
 	authenticate: IAuthenticateGeneric = {
