@@ -4,3 +4,7 @@ node_modules
 .DS_Store
 .env*
 /sbom/
+
+# Claude Code: track shared hookify guards, ignore the rest (settings.local.json, worktrees/)
+.claude/*
+!.claude/hookify.*.md
