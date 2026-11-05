@@ -82,7 +82,7 @@ All node tooling goes through `@n8n/node-cli` (`n8n-node`), exposed as npm scrip
 | `npm run e2e` | Drives the built node through a real n8n in Docker. Needs the API key and `n8n:up`. |
 | `npm run n8n:up` / `n8n:logs` / `n8n:down` | Start (and wait for healthy), follow and stop the Docker n8n. |
 | `npm run n8n:reset` | Wipes the n8n volume and starts clean. |
-| `npm run release` | `scripts/release.mjs`: checks, version bump, changelog stub, commit, tag, push. Does not publish. |
+| `npm run release` | `scripts/release.mjs`: checks, version bump, changelog stub, commit, tag, push. Does not publish. Non-interactive: `npm run release -- --bump minor --notes-ready` (same checks and refusals; the notes must already be under `## Unreleased`). |
 
 The usual pre-commit chain is:
 

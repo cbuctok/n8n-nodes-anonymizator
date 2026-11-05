@@ -200,7 +200,31 @@ function ask(question) {
 	});
 }
 
+/**
+ * Optional non-interactive answers to the two prompts, for a release driven from a script or an
+ * agent: `--bump <patch|minor|major>` and `--notes-ready` (the notes are already under
+ * `## Unreleased`). Every check and refusal still runs; an empty notes section still fails.
+ */
+function parseArgs(argv) {
+	const out = { bump: '', notesReady: false };
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === '--notes-ready') out.notesReady = true;
+		else if (arg === '--bump') out.bump = argv[(i += 1)] ?? '';
+		else if (arg.startsWith('--bump=')) out.bump = arg.slice('--bump='.length);
+		else fail(`unknown argument "${arg}" (known: --bump <patch|minor|major>, --notes-ready)`);
+	}
+	if (out.bump && !BUMPS.includes(out.bump)) fail(`--bump must be one of ${BUMPS.join(', ')}`);
+	return out;
+}
+
+const ARGS = parseArgs(process.argv.slice(2));
+
 async function chooseBump(current) {
+	if (ARGS.bump) {
+		console.log(`\n  current version: ${current}; bump ${ARGS.bump} (--bump)\n`);
+		return ARGS.bump;
+	}
 	if (!process.stdin.isTTY) {
 		fail('no terminal available for the version prompt; run this locally');
 	}
@@ -223,8 +247,12 @@ async function chooseBump(current) {
  * an empty one. Nothing is committed yet at this point, so a refusal leaves only two edited files.
  */
 async function waitForNotes(version) {
-	console.log(`  Write the release notes under "## ${version}" in CHANGELOG.md.`);
-	await ask('  Press Enter when they are saved: ');
+	if (ARGS.notesReady) {
+		console.log(`  --notes-ready: using the notes already under "## ${version}" in CHANGELOG.md.`);
+	} else {
+		console.log(`  Write the release notes under "## ${version}" in CHANGELOG.md.`);
+		await ask('  Press Enter when they are saved: ');
+	}
 
 	const text = readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8');
 	const start = text.indexOf(`\n## ${version} `);
