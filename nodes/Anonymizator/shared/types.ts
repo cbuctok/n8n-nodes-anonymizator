@@ -109,12 +109,20 @@ export type ProtectPossibleId = {
 	type: string | null;
 };
 
+/** What a text was sent to the gateway with: protocol v2, or v3 with native or vendored ML-KEM. */
+export type EncryptionUsed = 'v2' | 'v3-native' | 'v3-noble';
+
+/** The output field `encryption`: `none` when nothing was sent (blank text). */
+export type OutputEncryption = EncryptionUsed | 'none';
+
 /** Protect output item json (before optional input fields are merged in). */
 export type ProtectResult = {
 	protectedText: string;
 	/** Omitted when Include Placeholder Map is off. */
 	placeholderMap?: PlaceholderTable;
 	entities: OutputEntity[];
+	/** How the text was encrypted for the gateway (the weakest of its requests). */
+	encryption: OutputEncryption;
 	entityFilterIgnored?: true;
 	/** With Include ID File (and Include Placeholder Map on), Random and Numbers in Order only. */
 	idFile?: IdFileV2;
@@ -151,6 +159,8 @@ export type DetectResult = {
 	entityCount: number;
 	countsByType: Record<string, number>;
 	entities: DetectEntity[];
+	/** How the text was encrypted for the gateway (the weakest of its requests). */
+	encryption: OutputEncryption;
 	entityFilterIgnored?: true;
 	/** With Include Possible IDs. */
 	possibleIds?: DetectPossibleId[];

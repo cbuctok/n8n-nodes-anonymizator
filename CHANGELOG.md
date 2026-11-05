@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+Planned as 0.5.0 (a minor release: new default behaviour and a new output field).
+
+### Changed
+
+- **Protect** and **Detect** now use post-quantum encryption by default where they can. The
+  credential has a new **Encryption** setting whose default, **Automatic**, encrypts the text with
+  the gateway's protocol version 3 (X-Wing: X25519 together with ML-KEM-768) when n8n runs on a
+  Node.js with ML-KEM built in (24.7.0 and later) and the gateway offers it, and with standard
+  encryption otherwise. Automatic never uses the bundled, not independently audited ML-KEM code. The
+  choice is made before the text is sent, and a text that went out post-quantum is never sent again
+  with standard encryption. On Node.js 22 and older nothing changes.
+- The experimental **Post-Quantum Encryption (Experimental)** option became the **Always
+  Post-Quantum (Experimental)** choice of **Encryption**, still shown only with **Show Experimental
+  Options**. It now uses Node.js's own ML-KEM-768 where there is one and the bundled copy only
+  otherwise, and still fails rather than fall back to standard encryption. Credentials saved with
+  the option on keep it; all other credentials use Automatic, with no change needed.
+
+### Added
+
+- Added an `encryption` field to every **Protect** and **Detect** output item: `v3-native`
+  (post-quantum with Node.js's ML-KEM), `v3-noble` (post-quantum with the bundled ML-KEM), `v2`
+  (standard) or `none` (blank text, nothing sent). For a text sent in parts it is the weakest any
+  part used.
+- Added the message "The Anonymizator gateway stopped offering post-quantum encryption while this
+  text was being sent" (`hpke_pq_withdrawn`), for the rare case where the gateway withdraws
+  post-quantum encryption after part of a text was already sent with it under Automatic.
+
 ### Security
 
 - Updated the development toolchain lockfile: axios 1.18.0 to 1.20.0 (CVE-2026-101898 and six
