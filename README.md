@@ -586,7 +586,7 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
-- **Unreleased:** (planned as 0.5.0) post-quantum encryption by default where possible: a new
+- **0.5.0** (2026-11-05): (planned as 0.5.0) post-quantum encryption by default where possible: a new
   credential setting **Encryption**, **Automatic** by default (post-quantum with Node.js's built-in
   ML-KEM-768 when the gateway offers it, standard otherwise; never the bundled ML-KEM), and the
   former experimental option as **Always Post-Quantum (Experimental)**; a new `encryption` output
