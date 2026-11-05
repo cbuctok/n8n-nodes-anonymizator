@@ -12,6 +12,7 @@ repo; reference detail lives in `docs/agents/` (index at the end).
 - **Release**: `npm run release` (bumps, tags, pushes) → `publish.yml` **stages** on npm; a maintainer approves. Never publish by hand; ask before any release.
 - **Branch flow**: feature branch → `git merge --no-ff` into `dev` → fast-forward `master` (release branch) from `dev`. Remote is GitHub.
 - **Secrets**: only the gateway key in `.env.dev` (`ANON_API_KEY`); never print or commit it (see "The API key").
+- **make**: `make check-quiet` (lint + build + unit tests, quiet), `make test-quiet` (build + unit tests), `make land BR=<branch> [DRY=1]`, `make prune-merged [APPLY=1]`, `make whereami`.
 - **Ships**: only `dist/` and `NOTICE` (`files` in `package.json`); `.claude/`, `docs/`, `test/`, `examples/` never ship.
 
 An n8n community node package for the Anonymizator privacy gateway. **Protect** replaces personal
