@@ -120,6 +120,7 @@ describe('vectors end to end through analyze (pgw-v2.json)', () => {
 			],
 			possible: [],
 			entityFilterIgnored: false,
+			encryption: 'v2',
 		});
 		assert.deepEqual(
 			result.spans.map((s) => text.slice(s.start, s.end)),
@@ -252,13 +253,23 @@ describe('analyze: request', () => {
 		const { gw, options } = setup();
 		delete gw.ctx.getNode;
 		const result = await G.analyze(gw.ctx, 'hello', undefined, options);
-		assert.deepEqual(result, { spans: [], possible: [], entityFilterIgnored: false });
+		assert.deepEqual(result, {
+			spans: [],
+			possible: [],
+			entityFilterIgnored: false,
+			encryption: 'v2',
+		});
 	});
 
 	it('refuses no text up front: 120 001 characters go out in parts of at most 8 000', async () => {
 		const { gw, options } = setup();
 		const result = await G.analyze(gw.ctx, 'a'.repeat(120001), undefined, options);
-		assert.deepEqual(result, { spans: [], possible: [], entityFilterIgnored: false });
+		assert.deepEqual(result, {
+			spans: [],
+			possible: [],
+			entityFilterIgnored: false,
+			encryption: 'v2',
+		});
 		assert.equal(gw.posts().length, 16);
 		assert.ok(gw.opened.every((o) => o.payload.text.length <= 8000));
 		assert.equal(gw.opened.map((o) => o.payload.text).join('').length >= 120001, true);
@@ -1408,6 +1419,7 @@ describe('gatewayMessages', () => {
 			'hpke_bad_response',
 			'hpke_no_usable_key',
 			'hpke_pq_unavailable',
+			'hpke_pq_withdrawn',
 			'hpke_seal_failed',
 			'hpke_stale_keyconfig',
 			'hpke_unverified_keyconfig',

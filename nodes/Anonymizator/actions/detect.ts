@@ -143,6 +143,7 @@ export async function executeDetect(
 		entityCount: entities.length,
 		countsByType,
 		entities,
+		encryption: found.encryption,
 	};
 	if (found.entityFilterIgnored) result.entityFilterIgnored = true;
 	if (includePossible) {

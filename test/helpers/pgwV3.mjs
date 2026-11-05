@@ -16,6 +16,7 @@ import {
 	diffieHellman,
 	randomBytes,
 } from 'node:crypto';
+import * as nodeCrypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
@@ -96,6 +97,74 @@ export function xwingDecapsulate(enc, expanded) {
 	});
 	if (ssX.every((b) => b === 0)) throw new Error('all-zero X25519');
 	return sha3(Buffer.concat([ssM, ssX, ctX, expanded.pkX, XWING_LABEL]));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Node.js's native ML-KEM-768 (24.7.0 and later), written here independently of hpkeV3.ts: keys
+// from a 64-byte FIPS 203 seed d || z through the seed-only PKCS#8 form (RFC 9935), and
+// decapsulation. Used to check the node's native encapsulation and the vectors from the other side.
+
+// PKCS#8 OneAsymmetricKey for ML-KEM-768 holding only the seed: [0] IMPLICIT OCTET STRING (64).
+const MLKEM768_SEED_PKCS8 = Buffer.from('3054020100300b060960864801650304040204428040', 'hex');
+
+/** Whether this Node.js has a working native ML-KEM-768 (checked here independently). */
+export const NATIVE_MLKEM = (() => {
+	if (typeof nodeCrypto.encapsulate !== 'function') return false;
+	try {
+		const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ml-kem-768');
+		const { sharedKey, ciphertext } = nodeCrypto.encapsulate(publicKey);
+		return nodeCrypto.decapsulate(privateKey, ciphertext).equals(sharedKey);
+	} catch {
+		return false;
+	}
+})();
+export const NATIVE_SKIP = NATIVE_MLKEM ? false : 'this Node.js has no native ML-KEM-768';
+
+/** The native ML-KEM-768 key pair for a 64-byte seed d || z, and the raw 1184-byte pk_M. */
+export function nativeMlKemFromSeed(seed64) {
+	assert.equal(seed64.length, 64);
+	const privateKey = nodeCrypto.createPrivateKey({
+		key: Buffer.concat([MLKEM768_SEED_PKCS8, seed64]),
+		format: 'der',
+		type: 'pkcs8',
+	});
+	const spki = nodeCrypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+	return { privateKey, spki, pkM: Buffer.from(spki.subarray(spki.length - 1184)) };
+}
+
+/** X-Wing expandDecapsulationKey(sk) with the native ML-KEM-768 half. */
+export function xwingExpandNative(seed) {
+	assert.equal(seed.length, 32);
+	const e = shake256(seed, 96);
+	const { privateKey, pkM } = nativeMlKemFromSeed(Buffer.from(e.subarray(0, 64)));
+	const skX = Buffer.from(e.subarray(64, 96));
+	const pkX = x25519Public(skX);
+	return { mlkem: privateKey, skX, pkM, pkX, pk: Buffer.concat([pkM, pkX]) };
+}
+
+/** X-Wing Decapsulate(ct, sk) with the native ML-KEM-768 half; also returns ss_M. */
+export function xwingDecapsulateNative(enc, expanded) {
+	assert.equal(enc.length, 1120);
+	const ssM = nodeCrypto.decapsulate(expanded.mlkem, Buffer.from(enc.subarray(0, 1088)));
+	const ctX = Buffer.from(enc.subarray(1088));
+	const ssX = diffieHellman({
+		privateKey: createPrivateKey({
+			key: Buffer.concat([X25519_PKCS8, expanded.skX]),
+			format: 'der',
+			type: 'pkcs8',
+		}),
+		publicKey: createPublicKey({
+			key: Buffer.concat([X25519_SPKI, ctX]),
+			format: 'der',
+			type: 'spki',
+		}),
+	});
+	if (ssX.every((b) => b === 0)) throw new Error('all-zero X25519');
+	return {
+		ssM,
+		ssX,
+		ss: sha3(Buffer.concat([ssM, ssX, ctX, expanded.pkX, XWING_LABEL])),
+	};
 }
 
 // ---------------------------------------------------------------------------------------------

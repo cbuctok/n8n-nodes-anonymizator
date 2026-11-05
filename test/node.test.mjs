@@ -153,6 +153,7 @@ function installFakeAnalyze() {
 					? analyzeBehaviour.possible(text)
 					: [],
 			entityFilterIgnored: analyzeBehaviour.entityFilterIgnored === true,
+			encryption: analyzeBehaviour.encryption ?? 'v2',
 		};
 	};
 	gateway.fetchCapabilities = async () => {
@@ -787,7 +788,7 @@ describe('Include Placeholder Map (fake analyze)', () => {
 				options: { includePlaceholderMap: false },
 			}),
 		});
-		assert.deepEqual(Object.keys(item.json).sort(), ['entities', 'protectedText']);
+		assert.deepEqual(Object.keys(item.json).sort(), ['encryption', 'entities', 'protectedText']);
 	});
 
 	test('off with Include Input Fields: a copied placeholderMap or idFile is removed too', async () => {
@@ -911,6 +912,7 @@ describe('Detect (fake analyze)', () => {
 		}
 		assert.deepEqual(Object.keys(item.json).sort(), [
 			'countsByType',
+			'encryption',
 			'entities',
 			'entityCount',
 			'hasPersonalData',
@@ -940,6 +942,7 @@ describe('Detect (fake analyze)', () => {
 			entityCount: 0,
 			countsByType: {},
 			entities: [],
+			encryption: 'v2',
 		});
 	});
 
@@ -1320,7 +1323,7 @@ describe('gateway failures (fake analyze)', () => {
 		gateway.analyze = async (ctx, text) => {
 			calls += 1;
 			if (calls === 1) throw new GatewayError('auth_required', 'raw', 302);
-			return { spans: detect(text), entityFilterIgnored: false };
+			return { spans: detect(text), entityFilterIgnored: false, encryption: 'v2' };
 		};
 		const out = await run({
 			items: [{}, {}],

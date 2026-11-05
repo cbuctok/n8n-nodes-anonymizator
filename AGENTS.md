@@ -34,8 +34,9 @@ workflows store them, and the gateway and the browser extension rely on the wire
 | Wire version byte | `0x02` (request and response) | `WIRE_VERSION` in `shared/hpke.ts` |
 | ID file format | `{ format: 'anonymizator-id-file', version: 2 }` written; versions 1 and 2 read | `shared/placeholderMap.ts` |
 | Load-options method | `getEntityTypes` | `methods.loadOptions` in `Anonymizator.node.ts` |
-| EXPERIMENTAL v3 wire strings | `'pgw request v3'`, `'pgw response v3'`, header `pgw-keyconfig-v3`, wire byte `0x03`, suite `25722,1,2` (KEM `0x647a`) | `shared/hpkeV3.ts`, `shared/keyconfigV3.ts` |
-| EXPERIMENTAL credential fields | `showExperimental`, `postQuantum` (both boolean, default `false`) | `credentials/AnonymizatorApi.credentials.ts` |
+| v3 (post-quantum) wire strings | `'pgw request v3'`, `'pgw response v3'`, header `pgw-keyconfig-v3`, wire byte `0x03`, suite `25722,1,2` (KEM `0x647a`) | `shared/hpkeV3.ts`, `shared/keyconfigV3.ts` |
+| Credential fields for encryption | `showExperimental` (boolean, default `false`); `postQuantum`, displayed as **Encryption**: an `options` field with the **boolean** values `false` = Automatic (default) and `true` = Always Post-Quantum (Experimental). It was a boolean in 0.4.0; keeping the name and the values is the whole settings migration (see "Post-quantum protocol v3") | `credentials/AnonymizatorApi.credentials.ts` |
+| `encryption` output values | `v3-native`, `v3-noble`, `v2`, `none` | `EncryptionUsed` / `OutputEncryption` in `shared/types.ts` |
 
 Parameter names (`operation`, `text`, `detect`, `entityTypes`, `placeholderStyle`, `placeholderMap`,
 and the `options` keys `existingPlaceholderMap`, `shareMapAcrossItems`, `includeIdFile`,
@@ -43,7 +44,7 @@ and the `options` keys `existingPlaceholderMap`, `shareMapAcrossItems`, `include
 `includePossibleIds`), option values (the `entityTypes` row ids such as `PERSON`, `IBAN`, `EMSO`;
 `placeholderStyle` `random`/`sequential`/`typed`/`redacted`; `additionallyProtect`
 `NUMBER`/`AMOUNT`/`COMPANY`) and output field names (`protectedText`, `placeholderMap`, `entities`,
-`entityFilterIgnored`, `idFile`, `possibleIds`, `possibleIdsTruncated`, `revealedText`,
+`entityFilterIgnored`, `encryption`, `idFile`, `possibleIds`, `possibleIdsTruncated`, `revealedText`,
 `unresolvedPlaceholders`, `hasPersonalData`, `entityCount`, `countsByType`, and `entityType`,
 `start`, `end`, `score`, `placeholder`, `value`, `kind`, `type` inside entities and possible IDs) are
 stored in, or read by, saved workflows. Treat them as frozen too. Display names may change (the
@@ -161,7 +162,7 @@ evidence for the others.
 
 | Layer | What it runs | What only it catches |
 | --- | --- | --- |
-| `npm test` (`test/*.test.mjs`, `node:test`; 1043 tests, 0 skipped, on 2026-10-24) | The compiled `dist/` modules and the node class with fake `IExecuteFunctions` / `ILoadOptionsFunctions`. Every case of the gateway's vectors (`test/fixtures/pgw-v2.json` and `pgw-capabilities-v1.json`, copied byte for byte from the gateway repository's `tests/vectors/`): keyconfig cases, request frame bytes, response open, sealed errors, the `possible_emoji` exchange, offsets, capabilities cases. A fake v2 gateway (`test/helpers/pgw.mjs`: an independent `node:crypto` recipient with a test root, delegation and keyconfig, injected through the `trustRootsB64url` seam) for every status and retry path, and for long texts in parts (`test/chunker.test.mjs` ports the extension's chunker cases; `gateway.test.mjs` and `node.test.mjs` cover the split, the merge, straddling values, emoji offsets, failing parts, rate-limit waits and the `invalid_entities` restart). Differential and interop tests against the extension's real files (below). `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 and gateway vectors), the trust chain, wire format, every status mapping and retry path, the pipeline port's behaviour, map parsing, ID file rules, the catalog merge and filter, Detect offsets and counts, Ignore Terms, Include Placeholder Map, the new options. Fast and offline. |
+| `npm test` (`test/*.test.mjs`, `node:test`; on 2026-11-05: 1213 tests on Node 22.23.4 (1211 pass, 2 tests and 5 suites skipped, all "this Node.js has no native ML-KEM-768"), 1243 on Node 24.7.0 and 24.22.2 (1242 pass, 1 skipped: the native-absent case)) | The compiled `dist/` modules and the node class with fake `IExecuteFunctions` / `ILoadOptionsFunctions`. Every case of the gateway's vectors (`test/fixtures/pgw-v2.json` and `pgw-capabilities-v1.json`, copied byte for byte from the gateway repository's `tests/vectors/`): keyconfig cases, request frame bytes, response open, sealed errors, the `possible_emoji` exchange, offsets, capabilities cases. A fake v2 gateway (`test/helpers/pgw.mjs`: an independent `node:crypto` recipient with a test root, delegation and keyconfig, injected through the `trustRootsB64url` seam) for every status and retry path, and for long texts in parts (`test/chunker.test.mjs` ports the extension's chunker cases; `gateway.test.mjs` and `node.test.mjs` cover the split, the merge, straddling values, emoji offsets, failing parts, rate-limit waits and the `invalid_entities` restart). Differential and interop tests against the extension's real files (below). `examples.test.mjs` checks the example workflows' structure (package node type, connections, `$('Node')` references, no credential ids). | Crypto correctness (RFC 9180 and gateway vectors), the trust chain, wire format, every status mapping and retry path, the pipeline port's behaviour, map parsing, ID file rules, the catalog merge and filter, Detect offsets and counts, Ignore Terms, Include Placeholder Map, the new options. Fast and offline. |
 | `npm run smoke` (`scripts/smoke.mjs`, 24 scenarios) | The compiled node against **production**, with a fake context whose `httpRequestWithAuthentication` does a real `fetch` and honours n8n's options (no redirect following, no throw on error statuses, full response, Buffer bodies, timeout). | The live contract: keyconfig v2 and capabilities verifying against the pinned roots, response shape, offset unit, the published per-request cap, a ~40 000-character Protect and a Detect sent in parts (one request per part, one placeholder per value, offsets, Reveal round trip), status codes for a rejected key, detection on real sentences. |
 | `npm run e2e` (`scripts/e2e-n8n.mjs`) | `e2e/anonymizator-e2e.workflow.json` through a real n8n 2.44.5 in Docker over its REST API (19 nodes; "Protect No Map" also asserts Additionally Protect's `[AMOUNT_…]` and `[COMPANY_…]`, and "Check Typed" fails if the Type Only item, run with Include ID File on, has an `idFile`), a `getEntityTypes` call through `/rest/dynamic-node-parameters/options` that must return every bundled row plus at least one server-only type, then an import (no run) of every `examples/*/workflow.json` with the type prefix rewritten to `CUSTOM.`. | **n8n's parameter resolution**: expressions in json parameters, collections, the credential hidden by `displayOptions` on Reveal, the `CUSTOM.` type prefix, load options with a real credential, the tool variant being generated, icons being served; that every node type and version an example uses exists in this n8n (no "?" nodes on import). |
 | `npm run scan` (`scripts/scan.mjs`) | `@n8n/scan-community-package` 0.40.0 (lint plugin 0.37.0) on the source and on the `npm pack` tarball, as the verification pipeline does. | Rules newer than the local lint plugin, inline suppressions (which it ignores), unexpected files in the tarball. |
@@ -284,10 +285,12 @@ nodes/Anonymizator/
     hpke.ts                 RFC 9180 seal (Base mode, single shot), v2 frames, padding, response open
     keyconfig.ts            TRUST_ROOTS_B64URL, strict delegation/keyconfig v2 parsers, verifyDelegationV2,
                             verifyKeyconfigV2 (fail closed, key selection)
-    hpkeV3.ts               EXPERIMENTAL protocol v3: X-Wing encapsulation (node:crypto X25519 + vendored
-                            ML-KEM-768), the FIPS 203 key check, the key schedule, sealRequestV3
-    keyconfigV3.ts          EXPERIMENTAL: strict pgw-keyconfig-v3 parser, verifyKeyconfigV3 (the `v3`
-                            member, the same delegation verifier)
+    hpkeV3.ts               protocol v3: X-Wing encapsulation (node:crypto X25519 + ML-KEM-768 from
+                            Node.js itself (`native`, feature-tested by nativeMlKemAvailable) or the
+                            vendored code (`noble`)), the FIPS 203 key check, the key schedule,
+                            sealRequestV3
+    keyconfigV3.ts          strict pgw-keyconfig-v3 parser, verifyKeyconfigV3 (the `v3` member, the
+                            same delegation verifier)
     vendor/noblePq.ts, vendor/noble/*.ts   GENERATED subset of @noble/post-quantum, @noble/hashes and
                             @noble/curves (TypeScript sources); never edit, regenerate
     capabilities.ts         strict pgw-capabilities-v1 parser, verifyCapabilitiesV1
@@ -346,9 +349,9 @@ break offline use and the privacy claim in the README.
 `node:crypto` and relative paths. The lint rule `no-restricted-imports` also lets any
 **devDependency** through, and that is a trap: the build does not bundle, so such an import passes
 lint and then fails at runtime in the user's n8n. Third-party code that must ship is **vendored as
-source** instead: the experimental protocol v3's ML-KEM-768 and SHA-3 live in
-`shared/vendor/` (see "Experimental: post-quantum protocol v3"), compiled with the rest and scanned
-like our own code. `files` is `["dist", "NOTICE"]`; `npm pack` yields 108 files, 180 kB (`dist/`,
+source** instead: protocol v3's fallback ML-KEM-768 and SHA-3 (used only by Always Post-Quantum
+on a Node.js without native ML-KEM) live in `shared/vendor/` (see "Post-quantum protocol v3"),
+compiled with the rest and scanned like our own code. `files` is `["dist", "NOTICE"]`; `npm pack` yields 108 files, 180 kB (`dist/`,
 `NOTICE`, and `package.json`, `README.md` and `LICENSE.md`, which npm always adds; 2026-10-31,
 with the vendored code). `npm run scan` fails on anything else in the tarball.
 
@@ -384,8 +387,9 @@ the reference for API callers; keep it in step.
   allocation, substitution, PERSON sub-keys, companies, Additionally Protect, possible IDs, masking,
   the ID file and Reveal are computed locally. Do not add a feature that sends a map, a placeholder
   or revealed text to the gateway.
-- **Sealed end to end.** The text is HPKE-sealed to the gateway's current X25519 key, so the CDN and
-  the BFF in front of the gateway see only ciphertext. The response is sealed back with keys derived
+- **Sealed end to end.** The text is HPKE-sealed to the gateway's current X25519 key (v2) or X-Wing
+  key (v3, see "Post-quantum protocol v3"), so the CDN and the BFF in front of the gateway see only
+  ciphertext. The response is sealed back with keys derived
   from the same context. The README's "What leaves n8n" table lists every field and request sent
   (keyconfig, capabilities, analyze); keep it in step with `gateway.ts` and `hpke.ts`.
 - **Local filters stay local.** Ignore Terms, Include Values, Additionally Protect and the local
@@ -402,7 +406,8 @@ the reference for API callers; keep it in step.
   300 s skew) -> keys with a signed `not_after`. The key used is the **highest `key_id` with
   `now + 300 < not_after`**, never `keys[0]`. Parsers are strict: raw bytes checked before decoding,
   canonical base64url, full-regex numbers, Ed25519 signatures with the S < L check; nothing
-  canonicalises JSON. Only `v2` is read (the gateway serves `{"version": 2, "v2": ...}`):
+  canonicalises JSON. The v2 verifier reads only `v2` (the gateway serves `{"version": 2, "v2": ...}`,
+plus a sibling `v3` that only the v3 verifier reads, see "Post-quantum protocol v3"):
   a missing or failing `v2` is `hpke_unverified_keyconfig` (an HTML login page included),
   `hpke_stale_keyconfig` for a time window that does not hold by this clock, `hpke_no_usable_key`
   when no key stays valid long enough. All happen before the text is sealed, and the item stops with
@@ -573,6 +578,15 @@ gateway vectors' `offsets` and `possible_emoji` cases pin this.
 
 ### Live findings (production)
 
+2026-11-05 (smoke 27/27 on Node 22.23.4, 24.7.0 and 24.22.2, branch `feat/pq-auto`):
+
+- Production serves a verified `v3` member: v3 key id 1000003 under delegation serial 1793526621
+  (the v2 member's delegation).
+- Automatic: `v3-native` on both Node 24 versions for every Protect and Detect scenario (long texts
+  in parts included); `v2` on Node 22. Always Post-Quantum: `v3-native` on Node 24, `v3-noble` on
+  Node 22 and with the `nativeMlKem: false` seam. The gateway opened every frame, so its Python
+  X-Wing interoperates with Node.js's OpenSSL ML-KEM-768 and with the vendored one.
+
 2026-10-21 (smoke 24/24 on the integration commit):
 
 - Keyconfig v2 verifies against the pinned roots: key id 113, delegation serial 1792597552.
@@ -627,31 +641,83 @@ production), with `Date.now()` (timers are banned); they live for the n8n proces
   `chunker.ts`) and is re-exported from `gateway.ts`; `partTarget(caps)` = min(that - 2000, 100000).
 - `clearGatewayCaches()` resets all of it (tests).
 
-## Experimental: post-quantum protocol v3
+## Post-quantum protocol v3
 
-Branch `experimental-pq-v3` only; not released. The specification is the gateway repository's
-`docs/HPKE-V3-EXPERIMENTAL.md` (section 9.3 is this node). v3 is v2 with the hybrid KEM X-Wing
-(X25519 + ML-KEM-768, KEM `0x647a`) instead of DHKEM(X25519): frame `0x03 || key_id || timestamp ||
-enc(1120) || ct` (at least 1149 bytes), the same AAD, padding and response construction with
-`'pgw response v3'`, keys from a sibling `v3` member of `/v1/keyconfig` (`pgw-keyconfig-v3`) signed
-under the same delegation. v2 code paths and bytes are unchanged with the option off (the default).
+The specification is the gateway repository's `docs/HPKE-V3-EXPERIMENTAL.md` (section 9.3 is this
+node). v3 is v2 with the hybrid KEM X-Wing (X25519 + ML-KEM-768, KEM `0x647a`) instead of
+DHKEM(X25519): frame `0x03 || key_id || timestamp || enc(1120) || ct` (at least 1149 bytes), the
+same AAD, padding and response construction with `'pgw response v3'`, keys from a sibling `v3`
+member of `/v1/keyconfig` (`pgw-keyconfig-v3`) signed under the same delegation. The v2 code paths
+and bytes are unchanged.
 
-- **The option is in the credential**, as the last field, shown only with **Show Experimental
-  Options** (`displayOptions`), and on only when both booleans are exactly `true`
-  (`postQuantumEnabled` in `actions/protect.ts`). Why the credential: it is a property of the
-  connection, like the key, it would otherwise appear in both Protect's and Detect's Options and
-  could disagree, and the credential dialog is opened far less often than a node. Reveal has no
-  credential, so the option does not exist where nothing is sent. The credential test stays v2.
-- **Read at every send.** `analyze` takes a `postQuantum` reader and calls it before each send,
-  retry and reseal: on means v3 or nothing (`hpke_pq_unavailable` or the verifier's code), never
-  v2. A run may mix v2 and v3 parts after the option is switched on. A reader that throws fails the
-  item. A context without `getCredentials` (not an n8n execute context) is read as off.
+Since the change after 0.4.0 (planned 0.5.0), **v3 is the default wherever Node.js has native
+ML-KEM**, and the unaudited vendored ML-KEM is never used by default. This deliberately goes beyond
+the spec's section 9, which keeps every client opt-in; the policy was decided by the owner.
+
+- **Modes** (`EncryptionMode` in `gateway.ts`, read by `encryptionMode` in `actions/protect.ts`):
+  - `automatic` (default): v3 with the **native** ML-KEM-768 when `nativeMlKemAvailable()` AND the
+    keyconfig's `v3` member verifies, else v2. `acquireAutomaticResult` runs the v2 acquisition as
+    always (cache, floor, renewal race), then verifies the `v3` member of **the same raw document**
+    under the same floor, inside the one keyconfig queue: one `/v1/keyconfig` fetch serves both,
+    and a missing, failing, stale or keyless `v3` member means v2 (v2 never depends on v3, spec
+    7.1). A v2 failure fails as with standard encryption. A low-order `pk_X` in a verified v3 key is
+    `hpke_seal_failed` (nothing was sent; not downgraded).
+  - `postQuantum` (Always Post-Quantum): the previous experimental behaviour, v3 or nothing
+    (`hpke_pq_unavailable` or the verifier's code), now with the native ML-KEM where present and
+    the vendored one otherwise.
+  - `standard`: what `analyze` does without a reader (tests, diagnostics): v2 only.
+- **Credential and migration.** The 0.4.0 boolean `postQuantum` became an `options` field
+  (display name **Encryption**) with the boolean values `true` (Always Post-Quantum
+  (Experimental)) and `false` (Automatic, default), still shown only with `showExperimental`.
+  n8n passes a node only the credential fields that are **defined and displayed**
+  (`getNodeParameters` drops unknown and hidden ones), so a new field could not have read the old
+  value; keeping the name and its stored values makes the migration an identity: a 0.4.0 credential
+  with both booleans `true` is Always Post-Quantum, every other one Automatic. Boolean option values
+  have precedent in n8n-nodes-base (MonicaCrm, HaloPSA, Google Docs). The reader is Always
+  Post-Quantum only when both booleans are exactly `true`; a context without `getCredentials` is
+  Automatic; a credential read that throws fails the item. The credential test stays v2.
+- **Native ML-KEM** (`hpkeV3.ts`): `nativeMlKemAvailable()` is a memoised feature test (the KEM
+  functions exist, `generateKeyPairSync('ml-kem-768')`, an encapsulate/decapsulate round trip
+  through the SPKI import the seal uses); it never reads `process.version`. Node.js 24.7.0
+  (OpenSSL 3.5.2) has it; 22.x does not. `@types/node` 18 does not declare `crypto.encapsulate`, so
+  it is reached through a typed view of `import * as nodeCrypto` (no `any`, no lint change). The
+  public key is imported as SPKI (`308204b2300b0609608648016503040402038204a100` || pk_M), which
+  works from 24.7.0 on (`raw-public` / `raw-seed` only exist from 24.15). The native backend also
+  takes SHA3-256 from node:crypto, so it uses no vendored code at all.
+- **Native encapsulation is not derandomized.** OpenSSL draws ML-KEM's `m` itself, as the
+  gateway's Python (`cryptography`) does; X-Wing `Encapsulate` is `EncapsulateDerand` with a random
+  `eseed`, so the wire format is the spec's, but a fixed-`eseed` frame vector cannot be repeated
+  byte for byte on the native path (the `eseed[0:32]` half is unused there; `eseed[32:64]`, the
+  X25519 half, is used as before). `test/hpkeV3Native.test.mjs` therefore checks the native ML-KEM
+  through keygen (every vector seed gives the vector's pk) and decapsulation (every vector
+  ciphertext gives ss_M / ss / shared_secret), the native seal's X25519 half against the vectors
+  byte for byte, its frames opened by the independent recipient, and a native/vendored
+  differential. The vendored path still reproduces every frame byte for byte (`hpkeV3.test.mjs`).
+- **Never v2 after a v3 attempt.** `analyze` keeps one `SendState` per text: once a send of the
+  text was sealed as v3 (just before the POST), every later send of it (other parts, retries, the
+  `invalid_entities` rerun) uses the v3 keyconfig only, whatever the mode. Under Automatic a v3
+  that can no longer be had there is `hpke_pq_withdrawn` (own wording); under Always Post-Quantum
+  it stays `hpke_pq_unavailable`. A later n8n retry of the item (Retry On Fail) is a new run and
+  chooses afresh.
+- **Read at every send.** The mode is read before each send, retry and reseal; after a v2
+  acquisition it is read again and a switch to Always Post-Quantum restarts the send as v3 (spends
+  no retry budget).
 - **Retries:** v2's (one after `hpke_unknown_key` / `hpke_key_expired` / 5xx / `busy` / sealed
   `internal_error`), plus, for a v3 frame answered with a plain `hpke_bad_version`, one keyconfig
-  refetch and reseal with its own budget; a second one is `hpke_pq_unavailable`.
-- **Delegation serial floor:** one `commitDelegationFloor` (read, compare, raise) used by the v2
-  and the v3 acquisition, both inside `enqueue('keyconfig')`, so a floor raised by v3 is seen by
-  v2 and capabilities and the other way round. v3 has its own keyconfig cache.
+  refetch and reseal with its own budget; a second one is `hpke_pq_unavailable` /
+  `hpke_pq_withdrawn`.
+- **`encryption` output** (Protect and Detect): `GatewayAnalyzeResult.encryption` is the weakest
+  of all sends of the text (`v2` < `v3-noble` < `v3-native`), so a `v3-…` value means no part and no
+  attempt left n8n as v2; `none` for blank text (nothing sent). It is always written, so Include
+  Input Fields never carries an input item's value over.
+- **Test seam:** `nativeMlKem: false` in `GatewayTestSeams` simulates a Node.js without native
+  ML-KEM. Run the suite on Node 22 (absent for real) **and** on Node 24.7+ (present); both must pass.
+  Without a system Node 24, download the official tarball into a temp dir, check it against
+  `SHASUMS256.txt` and run `<tmp>/bin/node --test "test/*.test.mjs"` against the `dist/` built as
+  usual (and `<tmp>/bin/node scripts/smoke.mjs`).
+- **Delegation serial floor:** one `commitDelegationFloor` (read, compare, raise) used by the v2,
+  v3 and Automatic acquisitions, all inside `enqueue('keyconfig')`, so a floor raised by v3 is seen
+  by v2 and capabilities and the other way round. v3 has its own keyconfig cache.
 - **Leak rule:** errors are fixed codes; X-Wing intermediates and secrets are zeroed best effort.
 
 ### Vendoring (deviation from the spec's recipe, on purpose)
@@ -685,7 +751,8 @@ node scripts/vendor-noble-pq.mjs --tarballs /tmp/noble --write   # then lint, bu
 and dangerous calls in the source and in `dist/`, and runs a differential test against the
 extension's esbuild bundle of the same tarballs (unmodified upstream) when its experimental
 checkout is present. `@noble/post-quantum` is **not independently audited** (self-audit of 0.6.1);
-re-evaluate 0.6.1 vs 0.7.1 before any release (spec section 18). NOTICE carries the MIT notice;
+re-evaluate 0.6.1 vs 0.7.1 before any release (spec section 18). Since Automatic never uses it, it
+only matters for Always Post-Quantum on a Node.js without native ML-KEM. NOTICE carries the MIT notice;
 `npm run sbom` writes `sbom/vendored.cdx.json` from the lock.
 
 ### v3 tests and fixtures
@@ -697,11 +764,17 @@ components). `test/hpkeV3.test.mjs`: the three X-Wing draft-11 vectors and A.5 o
 draft-ietf-hpke-pq-05 (encapsulation included, the key schedule with the AEAD 3 override), every
 section of the shared vectors (frame byte for byte from the fixed `eseed`, responses, exchanges,
 62 keyconfig cases, capabilities, frame and seal cases, `v2_unchanged`). `test/helpers/pgwV3.mjs`
-holds the independent recipient (node:crypto SHA-3/SHAKE/X25519/HKDF; only ML-KEM from the vendored
-code, as node 22 has none), `openRequestForTestV3` (the gateway's pre-open order) and a fake v2 + v3
-gateway. `test/gatewayV3.test.mjs` covers off by default, fail closed, the bad-version budget,
-retries, the monotonic rule and the shared floor; `test/nodeV3.test.mjs` the credential and Protect
-/ Detect end to end. `smoke` and `e2e` do not cover v3 (production serves no `v3` member).
+holds the independent recipient (node:crypto SHA-3/SHAKE/X25519/HKDF; ML-KEM from the vendored
+code, so it runs on Node 22), an independent native ML-KEM recipient (`xwingExpandNative`,
+`xwingDecapsulateNative`: seed-only PKCS#8 import, `crypto.decapsulate`; `NATIVE_MLKEM` /
+`NATIVE_SKIP`), `openRequestForTestV3` (the gateway's pre-open order) and a fake v2 + v3 gateway.
+`test/hpkeV3Native.test.mjs` runs the vectors through the native ML-KEM (above).
+`test/gatewayV3.test.mjs` covers standard without a reader, Always Post-Quantum (fail closed, the
+bad-version budget, retries, the monotonic rule, native vs vendored), Automatic with native present
+and absent (real and simulated), never-v2-after-v3, `encryption`, and the shared floor;
+`test/nodeV3.test.mjs` the credential, the 0.4.0 migration and Protect / Detect end to end. `smoke`
+covers v3 live (keyconfig v3, Automatic, Always Post-Quantum native and vendored); `e2e` does not
+check the encryption.
 
 ## Placeholders, maps and the extension
 
@@ -1143,6 +1216,11 @@ imports.
 - **Possible types.** Production lists none (2026-10-21), so the gateway half of Include Possible IDs
   (`"possible": true`, kind `detected`, Detect's `possibleIds`) has only been tested against the
   vectors and the fake gateway. Re-run the smoke scenario when the gateway adds some.
+- **e2e with the Encryption setting.** Not run for the Automatic change (2026-11-05: the host's
+  disk was full, so the n8n 2.44.5 image could not be pulled). Run `npm run n8n:reset && npm run
+  e2e` before releasing; also open the credential in the editor once to see the **Encryption**
+  dropdown (boolean option values) and check which Node.js the n8n image runs (`docker exec
+  n8n-anonymizator-dev node -v`), since that decides what Automatic does there.
 - **Company spans tagged as LOCATION.** The gateway tagged "Modra Vila d.o.o." as LOCATION including
   the legal form; `companySpans` (like the extension) does not retype it. A server-side or
   extension-side decision, not a node fix.

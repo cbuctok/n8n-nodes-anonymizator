@@ -39,14 +39,16 @@ with the permission of Prosecco 37 d.o.o. The ported portions are:
 - the ID file format (versions 1 and 2) and its parse rules, from
   sidepanel/sidepanel-idfile.js, in nodes/Anonymizator/shared/placeholderMap.ts.
 
-Third-party code (EXPERIMENTAL post-quantum encryption, protocol v3)
+Third-party code (post-quantum encryption, protocol v3)
 
 nodes/Anonymizator/shared/vendor/ (compiled to dist/nodes/Anonymizator/shared/
 vendor/) contains a subset of the TypeScript sources of @noble/post-quantum
 0.7.1, @noble/hashes 2.4.0 and @noble/curves 2.4.0 (ML-KEM-768, SHA-3 and
 SHAKE), taken from the npm tarballs with the edits listed in
 vendor-noble.lock.json in the source repository. They are used only when the
-credential's experimental Post-Quantum Encryption option is on.
+credential's Encryption setting is Always Post-Quantum (experimental) and the
+Node.js running n8n has no ML-KEM-768 of its own; never with the default,
+Automatic.
 
 @noble/post-quantum: Copyright (c) 2024 Paul Miller (https://paulmillr.com)
 @noble/hashes:       Copyright (c) 2022 Paul Miller (https://paulmillr.com)

@@ -244,6 +244,75 @@ await scenario('Capabilities v1 verify (signed by the same delegation)', async (
 	assert.ok(caps.labels.get('type:PERSON').has('en'));
 });
 
+// Whether the gateway offers protocol v3 (post-quantum) and this Node.js has native ML-KEM-768;
+// the encryption scenarios below expect what follows from both.
+let offersV3 = false;
+const nativeMlKem = require(`${DIST}/shared/hpkeV3.js`).nativeMlKemAvailable();
+
+await scenario('Keyconfig v3 (post-quantum member): verified, or absent', async () => {
+	try {
+		const kc = await gateway.acquireKeyconfigV3(makeContext({}), { force: true });
+		offersV3 = true;
+		console.log(
+			`v3 key_id ${kc.keyId}, delegation serial ${kc.serial}, issued_at ${kc.issuedAt}, key not_after ${kc.notAfter}`,
+		);
+		assert.equal(kc.publicKey.length, 1216);
+	} catch (error) {
+		// No v3 member is a valid server state; anything else is a failure.
+		assert.equal(error.code, 'hpke_pq_unavailable', String(error));
+		console.log('the gateway offers no v3 member');
+	}
+	console.log(`node ${process.version}: native ML-KEM-768 ${nativeMlKem ? 'present' : 'absent'}`);
+});
+
+await scenario('Encryption: Automatic (the default) reports what it used', async () => {
+	const [protectOut] = await execute(protect(TEXT));
+	const [detectOut] = await execute({
+		operation: 'detect',
+		text: TEXT,
+		detect: 'all',
+		options: {},
+	});
+	const expected = offersV3 && nativeMlKem ? 'v3-native' : 'v2';
+	console.log(`Protect: ${protectOut.encryption}, Detect: ${detectOut.encryption}`);
+	assert.equal(protectOut.encryption, expected);
+	assert.equal(detectOut.encryption, expected);
+	assert.ok(!protectOut.protectedText.includes(PERSON), 'name replaced');
+	const [blank] = await execute(protect('   '));
+	assert.equal(blank.encryption, 'none');
+});
+
+await scenario('Encryption: Always Post-Quantum, native and vendored ML-KEM', async () => {
+	const text = 'my name is Janez Novak';
+	const always = { encryption: () => 'postQuantum' };
+	const runs = [
+		['default', {}],
+		['vendored (nativeMlKem: false)', { nativeMlKem: false }],
+	];
+	for (const [label, seam] of runs) {
+		if (!offersV3) {
+			let caught;
+			try {
+				await gateway.analyze(makeContext({}), text, undefined, { ...always, ...seam });
+			} catch (error) {
+				caught = error;
+			}
+			assert.equal(caught?.code, 'hpke_pq_unavailable');
+			console.log(`${label}: hpke_pq_unavailable (no v3 member), nothing sent`);
+			continue;
+		}
+		const result = await gateway.analyze(makeContext({}), text, undefined, { ...always, ...seam });
+		console.log(`${label}: ${result.encryption}`);
+		assert.equal(
+			result.encryption,
+			seam.nativeMlKem === false || !nativeMlKem ? 'v3-noble' : 'v3-native',
+		);
+		assert.ok(
+			result.spans.some((s) => s.entity_type === 'PERSON' && text.slice(s.start, s.end) === PERSON),
+		);
+	}
+});
+
 await scenario('Analyze directly: spans (and possible spans when asked)', async () => {
 	const text = 'my name is Janez Novak, janez.novak@example.com';
 	const result = await gateway.analyze(makeContext({}), text, undefined, { possible: true });

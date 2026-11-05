@@ -25,7 +25,7 @@ import type { MergedCatalog } from '../shared/entities';
 import { errorNode, GatewayError } from '../shared/errors';
 import type { ExtraOptions } from '../shared/extraDetect';
 import { analyze, effectiveMaxTextChars, fetchCapabilities } from '../shared/gateway';
-import type { PossibleSpan } from '../shared/gateway';
+import type { EncryptionMode, PossibleSpan } from '../shared/gateway';
 import { failedPartText, gatewayErrorText, LOCAL_FAILURES } from '../shared/gatewayMessages';
 import { ignoredTermTest, parseIgnoreTerms } from '../shared/ignoreTerms';
 import { parsePlaceholderMap, toIdFile } from '../shared/placeholderMap';
@@ -34,7 +34,13 @@ import { detectedValues, fromFlatMap, protect, revealTable } from '../shared/pro
 import type { PipelineState } from '../shared/protectPipeline';
 import type { Alias, IdRecord } from '../shared/idModel';
 import { CREDENTIAL_NAME } from '../shared/types';
-import type { Numbering, PlaceholderTable, ProtectResult, Span } from '../shared/types';
+import type {
+	Numbering,
+	OutputEncryption,
+	PlaceholderTable,
+	ProtectResult,
+	Span,
+} from '../shared/types';
 
 const showForProtect = { show: { operation: ['protect'] } };
 const showForGateway = { show: { operation: ['protect', 'detect'] } };
@@ -267,18 +273,21 @@ export function readEntityTypes(
 // Gateway
 
 /**
- * EXPERIMENTAL: whether the credential turns post-quantum encryption (protocol v3) on. Only when
- * both `showExperimental` and `postQuantum` are exactly `true`, so hiding the experimental options
- * also turns it off, and a credential saved before the fields existed is off. Read before every
- * send (the gateway layer calls it per request). A credential read that throws fails the item, as
- * any request with that credential would; no silent fallback to standard encryption.
+ * The credential's Encryption setting: Always Post-Quantum (`postQuantum`) only when both
+ * `showExperimental` and `postQuantum` are exactly `true`, so hiding the experimental options goes
+ * back to Automatic; everything else, including a credential saved before the fields existed or
+ * by 0.4.0 with its experimental option off, is Automatic. Read before every send (the gateway
+ * layer calls it per request). A credential read that throws fails the item, as any request with
+ * that credential would; no silent fallback.
  */
-export async function postQuantumEnabled(ctx: IExecuteFunctions): Promise<boolean> {
+export async function encryptionMode(ctx: IExecuteFunctions): Promise<EncryptionMode> {
 	// n8n's execute contexts always have getCredentials (FunctionsBase); a stand-in context without
-	// it cannot hold the experimental setting at all.
-	if (typeof ctx.getCredentials !== 'function') return false;
+	// it cannot hold the setting at all, so it gets the default.
+	if (typeof ctx.getCredentials !== 'function') return 'automatic';
 	const credentials = (await ctx.getCredentials(CREDENTIAL_NAME)) as Record<string, unknown>;
-	return credentials.showExperimental === true && credentials.postQuantum === true;
+	return credentials.showExperimental === true && credentials.postQuantum === true
+		? 'postQuantum'
+		: 'automatic';
 }
 
 /** What `detectRemotely` returns: the gateway's findings for one item. */
@@ -287,6 +296,8 @@ export type GatewayDetection = {
 	/** Review-only spans of the types the capabilities list; [] unless asked for. */
 	possible: PossibleSpan[];
 	entityFilterIgnored: boolean;
+	/** What the text was sent with; `none` for blank text, which is never sent. */
+	encryption: OutputEncryption;
 };
 
 /**
@@ -303,20 +314,22 @@ export async function detectRemotely(
 	text: string,
 	wantPossible: boolean,
 ): Promise<GatewayDetection> {
-	if (text.trim() === '') return { spans: [], possible: [], entityFilterIgnored: false };
+	if (text.trim() === '') {
+		return { spans: [], possible: [], entityFilterIgnored: false, encryption: 'none' };
+	}
 	const caps = await fetchCapabilities(ctx);
 	const entityTypes = readEntityTypes(ctx, itemIndex, mergeCatalog(caps));
 	const possibleTypes = new Set((caps?.possible ?? []).map((p) => p.type));
 	const askPossible = wantPossible && possibleTypes.size > 0;
 	const maxTextChars = effectiveMaxTextChars(caps);
-	const postQuantum = () => postQuantumEnabled(ctx);
+	const encryption = () => encryptionMode(ctx);
 	let result;
 	try {
 		result = await analyze(
 			ctx,
 			text,
 			entityTypes,
-			askPossible ? { possible: true, maxTextChars, postQuantum } : { maxTextChars, postQuantum },
+			askPossible ? { possible: true, maxTextChars, encryption } : { maxTextChars, encryption },
 		);
 	} catch (error) {
 		throw gatewayFailure(ctx, error, itemIndex);
@@ -327,6 +340,7 @@ export async function detectRemotely(
 			? (result.possible ?? []).filter((p) => possibleTypes.has(p.entity_type))
 			: [],
 		entityFilterIgnored: result.entityFilterIgnored,
+		encryption: result.encryption,
 	};
 }
 
@@ -733,6 +747,7 @@ export async function executeProtect(
 			end: entity.end,
 			score: entity.score,
 		})),
+		encryption: found.encryption,
 	};
 	if (found.entityFilterIgnored) result.entityFilterIgnored = true;
 	if (includePossible) {
