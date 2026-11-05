@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-Planned as 0.5.0 (a minor release: new default behaviour and a new output field).
-
 ### Changed
 
 - **Protect** and **Detect** now use post-quantum encryption by default where they can. The
