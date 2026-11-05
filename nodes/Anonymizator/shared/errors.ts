@@ -88,11 +88,17 @@ export type GatewayErrorCode =
 	/** The verified keyconfig lists no key valid for long enough. */
 	| 'hpke_no_usable_key'
 	/**
-	 * EXPERIMENTAL protocol v3: post-quantum encryption is on in the credential, but the gateway
-	 * offers no `v3` keyconfig member (or answered a v3 frame twice with `hpke_bad_version`).
-	 * Nothing was sent as v2 instead.
+	 * Protocol v3: the credential's Encryption is Always Post-Quantum, but the gateway offers no
+	 * `v3` keyconfig member (or answered a v3 frame twice with `hpke_bad_version`). Nothing was
+	 * sent as v2 instead.
 	 */
 	| 'hpke_pq_unavailable'
+	/**
+	 * Protocol v3 under Automatic: part of the text (or an earlier attempt) already went out as v3,
+	 * and the gateway stopped offering v3 before the rest could be sent. The text is never sent
+	 * as v2 after a v3 attempt, so the item stops.
+	 */
+	| 'hpke_pq_withdrawn'
 	/** Sealing the request failed. */
 	| 'hpke_seal_failed'
 	/** The response could not be opened, parsed or classified, or a span lies outside the text. */

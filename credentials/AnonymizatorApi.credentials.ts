@@ -34,25 +34,44 @@ export class AnonymizatorApi implements ICredentialType {
 			description:
 				'Anonymizator API key, created and managed in the Prosecco 37 Anonymizator user portal. The node sends it as a bearer token to the privacy gateway; only Protect uses it.',
 		},
-		// EXPERIMENTAL (gateway docs/HPKE-V3-EXPERIMENTAL.md, section 9.3). Kept last and behind a
-		// gate on purpose: it is a property of the connection (how the text is encrypted to the
-		// gateway), so it belongs here rather than in every node's options, and the credential
-		// dialog is opened far less often. Post-quantum is on only when BOTH booleans are true.
+		// Encryption (gateway docs/HPKE-V3-EXPERIMENTAL.md, section 9.3). Kept last and behind a
+		// gate: it is a property of the connection (how the text is encrypted to the gateway), so it
+		// belongs here rather than in every node's options, and the default needs no attention.
+		// `postQuantum` keeps its name from 0.4.0, where it was a boolean, and its stored values:
+		// `false` or absent is Automatic, `true` is Always Post-Quantum. A credential saved by 0.4.0
+		// with the experimental option on therefore stays Always Post-Quantum, and every other one
+		// becomes Automatic, with no migration step. Hiding the gate hides the field, and n8n then
+		// passes no value, which is Automatic.
 		{
 			displayName: 'Show Experimental Options',
 			name: 'showExperimental',
 			type: 'boolean',
 			default: false,
-			description: 'Whether to show options that are experimental and may change or go away',
+			description:
+				'Whether to show the Encryption setting, whose Always Post-Quantum choice is experimental',
 		},
 		{
-			displayName: 'Post-Quantum Encryption (Experimental)',
+			displayName: 'Encryption',
 			name: 'postQuantum',
-			type: 'boolean',
+			type: 'options',
+			options: [
+				{
+					name: 'Always Post-Quantum (Experimental)',
+					value: true,
+					description:
+						"Always the post-quantum protocol. Where Node.js has no ML-KEM of its own, uses a bundled copy of @noble/post-quantum, which has not been independently audited. Protect and Detect fail instead of using standard encryption when the gateway doesn't offer it.",
+				},
+				{
+					name: 'Automatic',
+					value: false,
+					description:
+						'Post-quantum (X-Wing) when Node.js has ML-KEM built in (24.7.0 and later) and the gateway offers it, standard encryption otherwise. Never uses bundled post-quantum code.',
+				},
+			],
 			default: false,
 			displayOptions: { show: { showExperimental: [true] } },
 			description:
-				"Whether to seal requests with the experimental post-quantum protocol (X-Wing). Protect and Detect fail instead of using standard encryption when the gateway doesn't offer it. The connection test checks standard encryption only.",
+				'How Protect and Detect encrypt the text for the gateway. Each output item reports the encryption used in its encryption field. The connection test checks standard encryption only.',
 		},
 	];
 

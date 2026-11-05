@@ -107,13 +107,19 @@ export const GATEWAY_MESSAGES: Record<
 			'The signed key configuration lists no key that stays valid long enough. The text was not sent. Try again later.',
 	},
 
-	// EXPERIMENTAL protocol v3 (the credential's Post-Quantum Encryption option). The credential
-	// test checks standard encryption only, so it can pass while this fails.
+	// Protocol v3 (the credential's Encryption setting). The credential test checks standard
+	// encryption only, so it can pass while these fail.
 	hpke_pq_unavailable: {
 		message:
 			"Post-quantum encryption is on, but the Anonymizator gateway doesn't offer it, so nothing was sent",
 		description:
-			'The text was not sent with standard encryption instead. Turn off Post-Quantum Encryption (Experimental) in the Anonymizator API credential to protect with standard encryption, or try again later. The credential test checks standard encryption only.',
+			'The text was not sent with standard encryption instead. Set Encryption to Automatic in the Anonymizator API credential to use post-quantum encryption only where it is available, or try again later. The credential test checks standard encryption only.',
+	},
+	hpke_pq_withdrawn: {
+		message:
+			'The Anonymizator gateway stopped offering post-quantum encryption while this text was being sent',
+		description:
+			'Part of the text, or an earlier attempt, was already sent with post-quantum encryption, so it was not sent again with standard encryption. Run the item again: the node then chooses the encryption afresh.',
 	},
 
 	hpke_required: SECURE,
@@ -152,6 +158,7 @@ export const LOCAL_FAILURES: ReadonlySet<GatewayErrorCode> = new Set<GatewayErro
 	'hpke_stale_keyconfig',
 	'hpke_no_usable_key',
 	'hpke_pq_unavailable',
+	'hpke_pq_withdrawn',
 	'hpke_seal_failed',
 	'hpke_bad_response',
 	'timeout',

@@ -30,13 +30,21 @@
  * - plain-JSON codes pass an allowlist (`KNOWN_ERROR_CODES`), sealed ones `SEALED_ERROR_CODES`;
  *   server text (`detail`, `error_description`) is never kept.
  *
- * EXPERIMENTAL protocol v3 (post-quantum, X-Wing; gateway docs/HPKE-V3-EXPERIMENTAL.md): when the
- * caller's `postQuantum` reader says on AT THE TIME OF A SEND (it is read before every send,
- * including every retry), that send is sealed as v3 to a key from the verified `v3` keyconfig
- * member, or the part fails (`hpke_pq_unavailable` or the verifier's code). It is never sent as v2
- * instead. A v3 frame answered with a plain `hpke_bad_version` gets one keyconfig refetch and one
- * reseal per part (its own budget); a second one is `hpke_pq_unavailable`. Without a reader, or with
- * it off, nothing of v3 runs and every request is v2, byte for byte as before.
+ * Post-quantum protocol v3 (X-Wing; gateway docs/HPKE-V3-EXPERIMENTAL.md), chosen per send from the
+ * caller's `encryption` reader, which is read before EVERY send (every part, retry and reseal):
+ * - `postQuantum` (the credential's Always Post-Quantum): v3 to a key from the verified `v3`
+ *   keyconfig member, with Node.js's native ML-KEM-768 where it exists, else the vendored one, or
+ *   the part fails (`hpke_pq_unavailable` or the verifier's code). Never v2 instead.
+ * - `automatic` (the default): v3 with the NATIVE ML-KEM-768 when this Node.js has it AND the
+ *   verified keyconfig offers a `v3` member that verifies; otherwise v2. The choice is made before
+ *   the send, from the same keyconfig document. The vendored (unaudited) ML-KEM is never used.
+ * - `standard` (no reader; tests and diagnostics): v2 only, nothing of v3 runs.
+ * Monotonic: once one send of a text went out as v3, every later send of that text (other parts,
+ * retries, the `invalid_entities` rerun) is v3 or nothing, in every mode; the same text is never
+ * sent as v2 after a v3 attempt (`hpke_pq_withdrawn` when the gateway stops offering v3 meanwhile
+ * under Automatic). A v3 frame answered with a plain `hpke_bad_version` gets one keyconfig refetch
+ * and one reseal per part (its own budget); a second one ends the part. The result reports what
+ * the text was sent with (`encryption`: the weakest of its sends).
  *
  * Lint note: nothing is thrown lexically inside a `catch` (scanner rule require-node-api-error);
  * failures are recorded in a variable and thrown after the catch.
@@ -53,11 +61,17 @@ import { merge, partTargetFor, split, type TextPart } from './chunker';
 import { GatewayError, type GatewayErrorCode } from './errors';
 import { gatewayErrorText } from './gatewayMessages';
 import { sealRequestV2, type SealedRequest, type TestEphemeral } from './hpke';
-import { sealRequestV3 } from './hpkeV3';
+import { nativeMlKemAvailable, sealRequestV3, type MlKemBackend } from './hpkeV3';
 import { TRUST_ROOTS_B64URL, verifyKeyconfigV2, type KeyconfigVerification } from './keyconfig';
 import { verifyKeyconfigV3, type VerifiedKeyconfigV3 } from './keyconfigV3';
 import { MAX_TEXT_CHARS } from './limits';
-import { CREDENTIAL_NAME, GATEWAY_BASE_URL, GATEWAY_TIMEOUT_MS, type Span } from './types';
+import {
+	CREDENTIAL_NAME,
+	GATEWAY_BASE_URL,
+	GATEWAY_TIMEOUT_MS,
+	type EncryptionUsed,
+	type Span,
+} from './types';
 
 export { GatewayError };
 export type { VerifiedCapabilities };
@@ -100,7 +114,18 @@ export type GatewayTestSeams = {
 	testEphemeral?: TestEphemeral;
 	/** Fixed 64-byte X-Wing `eseed` for protocol v3 (test vectors only, as `testEphemeral`). */
 	testEseed?: Buffer;
+	/** `false` simulates a Node.js without native ML-KEM-768 (tests); omitted: feature-tested. */
+	nativeMlKem?: boolean;
 };
+
+/**
+ * How a text is to be encrypted, as read from the credential before every send: `automatic`
+ * (v3 with native ML-KEM when available and offered, else v2), `postQuantum` (v3 or nothing) or
+ * `standard` (v2 only; what a call without a reader gets).
+ */
+export type EncryptionMode = 'automatic' | 'postQuantum' | 'standard';
+
+export type { EncryptionUsed };
 
 export type AnalyzeOptions = {
 	/** Ask for the review-only `possible` spans (`"possible": true` in the sealed payload). */
@@ -111,11 +136,11 @@ export type AnalyzeOptions = {
 	 */
 	maxTextChars?: number;
 	/**
-	 * EXPERIMENTAL: whether post-quantum encryption (protocol v3) is on, read before EVERY send
-	 * (every part, retry and reseal). Only `true` is on. A reader that throws fails the text (no
-	 * silent fallback). Omitted: off, every request is v2.
+	 * The encryption mode, read before EVERY send (every part, retry and reseal). Only the exact
+	 * strings `automatic` and `postQuantum` select them; anything else is `standard`. A reader that
+	 * throws fails the text (no silent fallback). Omitted: `standard`, every request is v2.
 	 */
-	postQuantum?: () => boolean | Promise<boolean>;
+	encryption?: () => EncryptionMode | Promise<EncryptionMode>;
 } & GatewayTestSeams;
 
 /** One review-only span: never substituted, only listed. UTF-16 offsets into the original text. */
@@ -129,6 +154,11 @@ export type GatewayAnalyzeResult = {
 	possible: PossibleSpan[];
 	/** True when the gateway refused the entity filter and the text was analysed with all types. */
 	entityFilterIgnored: boolean;
+	/**
+	 * What the text was sent with: the weakest of all its sends (v2 < v3-noble < v3-native), so
+	 * `v3-…` means that no part of the text, and no attempt, ever left n8n as v2.
+	 */
+	encryption: EncryptionUsed;
 };
 
 /** Keyconfig cache TTL, matching the extension. The cached document is re-verified on every use. */
@@ -596,11 +626,17 @@ function storeConfig(
 	return true;
 }
 
+/**
+ * One acquisition for `flavor`. On success `used.config` (when given) is set to the raw
+ * /v1/keyconfig JSON the returned key was verified from, so Automatic can check that same document
+ * for a `v3` member.
+ */
 async function acquireKeyconfigOnce(
 	ctx: GatewayContext,
 	flavor: KeyconfigFlavor,
 	force: boolean,
 	options: GatewayTestSeams | undefined,
+	used?: { config?: unknown },
 ): Promise<KeyconfigResult> {
 	const key = stateKey(options);
 	const floor = delegationFloors.get(key) ?? 0;
@@ -608,7 +644,10 @@ async function acquireKeyconfigOnce(
 	if (!force && cached && nowMs(options) - cached.fetchedAt < KEYCONFIG_TTL_MS) {
 		// Never trusted as stored: re-verified on every use.
 		const verified = verifyConfig(flavor, cached.config, floor, options);
-		if (verified.ok) return verified;
+		if (verified.ok) {
+			if (used) used.config = cached.config;
+			return verified;
+		}
 		// Expired or otherwise no longer valid: drop it and fetch once.
 		flavor.cache.delete(key);
 	}
@@ -622,7 +661,10 @@ async function acquireKeyconfigOnce(
 		// A 200 that is sealed is not a keyconfig.
 		const config = result.sealed ? {} : result.data;
 		const verified = verifyConfig(flavor, config, floor, options);
-		if (verified.ok && storeConfig(flavor, key, config, verified.serial, options)) return verified;
+		if (verified.ok && storeConfig(flavor, key, config, verified.serial, options)) {
+			if (used) used.config = config;
+			return verified;
+		}
 		if (!verified.ok && !('belowFloor' in verified)) {
 			return { ok: false, status: result.status, error: verified.error };
 		}
@@ -632,7 +674,10 @@ async function acquireKeyconfigOnce(
 		const current = delegationFloors.get(key) ?? 0;
 		if (cached) {
 			const previous = verifyConfig(flavor, cached.config, current, options);
-			if (previous.ok) return previous;
+			if (previous.ok) {
+				if (used) used.config = cached.config;
+				return previous;
+			}
 		}
 		if (attempt >= 2) {
 			return { ok: false, status: result.status, error: 'hpke_unverified_keyconfig' };
@@ -648,6 +693,29 @@ function acquireKeyconfigResult(
 	flavor: KeyconfigFlavor = V2_KEYCONFIG,
 ): Promise<KeyconfigResult> {
 	return enqueue('keyconfig', async () => await acquireKeyconfigOnce(ctx, flavor, force, options));
+}
+
+/**
+ * Automatic: the v2 acquisition as always (cache, floor, renewal race), then the `v3` member of
+ * the very document that v2 key came from, under the same floor. Returns the v3 key when that
+ * member verifies, else the v2 key; a v2 failure is returned as is (Automatic needs what Standard
+ * needs). One /v1/keyconfig fetch serves both, inside the one keyconfig queue. The v3 floor is
+ * committed like any v3 acquisition's (the shared delegation serial).
+ */
+function acquireAutomaticResult(
+	ctx: GatewayContext,
+	force: boolean,
+	options: GatewayTestSeams | undefined,
+): Promise<{ result: KeyconfigResult; v3: boolean }> {
+	return enqueue('keyconfig', async () => {
+		const used: { config?: unknown } = {};
+		const v2 = await acquireKeyconfigOnce(ctx, V2_KEYCONFIG, force, options, used);
+		if (!v2.ok) return { result: v2, v3: false };
+		const key = stateKey(options);
+		const v3 = verifyConfig(V3_KEYCONFIG, used.config, delegationFloors.get(key) ?? 0, options);
+		if (v3.ok && commitDelegationFloor(key, v3.serial)) return { result: v3, v3: true };
+		return { result: v2, v3: false };
+	});
 }
 
 /**
@@ -810,21 +878,53 @@ function sealFor(
 	keyId: number,
 	payload: Record<string, unknown>,
 	options: AnalyzeOptions | undefined,
-	postQuantum = false,
+	backend?: MlKemBackend,
 ): SealedRequest | undefined {
 	try {
-		return postQuantum
-			? sealRequestV3(publicKey, keyId, payload, options?.nowSeconds, options?.testEseed)
+		return backend !== undefined
+			? sealRequestV3(publicKey, keyId, payload, options?.nowSeconds, options?.testEseed, backend)
 			: sealRequestV2(publicKey, keyId, payload, options?.nowSeconds, options?.testEphemeral);
 	} catch {
 		return undefined;
 	}
 }
 
-/** EXPERIMENTAL: whether this send is post-quantum (v3). Only an explicit `true` is on. */
-async function postQuantumOn(options: AnalyzeOptions | undefined): Promise<boolean> {
-	if (typeof options?.postQuantum !== 'function') return false;
-	return (await options.postQuantum()) === true;
+/** The mode for this send. Only the exact strings select Automatic or Always Post-Quantum. */
+async function encryptionModeOf(options: AnalyzeOptions | undefined): Promise<EncryptionMode> {
+	if (typeof options?.encryption !== 'function') return 'standard';
+	const mode: unknown = await options.encryption();
+	return mode === 'automatic' || mode === 'postQuantum' ? mode : 'standard';
+}
+
+/** Whether this process has a working native ML-KEM-768 (the `nativeMlKem: false` seam aside). */
+function hasNativeMlKem(options: GatewayTestSeams | undefined): boolean {
+	return options?.nativeMlKem !== false && nativeMlKemAvailable();
+}
+
+/** Per text: whether it is pinned to v3, and what its sends used. */
+type SendState = { v3Only: boolean; used: Set<EncryptionUsed> };
+
+const ENCRYPTION_ORDER: readonly EncryptionUsed[] = ['v2', 'v3-noble', 'v3-native'];
+
+/**
+ * The keyconfig for this send and whether it is v3: pinned (an earlier send of this text was v3)
+ * or Always Post-Quantum read the `v3` member only; Automatic with native ML-KEM picks v3 when the
+ * document offers it; everything else is v2.
+ */
+async function keyconfigForSend(
+	ctx: GatewayContext,
+	mode: EncryptionMode,
+	state: SendState,
+	force: boolean,
+	options: AnalyzeOptions | undefined,
+): Promise<{ result: KeyconfigResult; v3: boolean }> {
+	if (state.v3Only || mode === 'postQuantum') {
+		return { result: await acquireKeyconfigResult(ctx, force, options, V3_KEYCONFIG), v3: true };
+	}
+	if (mode === 'automatic' && hasNativeMlKem(options)) {
+		return await acquireAutomaticResult(ctx, force, options);
+	}
+	return { result: await acquireKeyconfigResult(ctx, force, options, V2_KEYCONFIG), v3: false };
 }
 
 /**
@@ -847,6 +947,7 @@ async function analyzeSealed(
 	text: string,
 	filter: string[] | undefined,
 	options: AnalyzeOptions | undefined,
+	state: SendState,
 ): Promise<AnalyzeOutcome> {
 	if (codePointLength(text) > (options?.maxTextChars ?? MAX_TEXT_CHARS)) {
 		return { ok: false, error: 'payload_too_large' };
@@ -860,23 +961,32 @@ async function analyzeSealed(
 	// The one retry (rotation, server error) and, for v3 only, the one bad-version reseal.
 	let retried = false;
 	let badVersionResealed = false;
+	// v3 that can no longer be had: the Always Post-Quantum wording, or, when the text was pinned
+	// to v3 under Automatic, the one that says the gateway withdrew it mid-text.
+	const pqFailure = <T extends FetchFailure>(failure: T, mode: EncryptionMode): T =>
+		failure.error === 'hpke_pq_unavailable' && mode !== 'postQuantum'
+			? { ...failure, error: 'hpke_pq_withdrawn' }
+			: failure;
 	for (;;) {
-		// Read at every send: post-quantum on now means v3 or nothing, never v2.
-		const postQuantum = await postQuantumOn(options);
-		const kc = await acquireKeyconfigResult(
-			ctx,
-			refetchKeyconfig,
-			options,
-			postQuantum ? V3_KEYCONFIG : V2_KEYCONFIG,
-		);
+		// Read at every send: Always Post-Quantum now means v3 or nothing, never v2.
+		const mode = await encryptionModeOf(options);
+		const { result: kc, v3 } = await keyconfigForSend(ctx, mode, state, refetchKeyconfig, options);
 		refetchKeyconfig = false;
-		if (!kc.ok) return kc;
+		if (!kc.ok) return v3 ? pqFailure(kc, mode) : kc;
 		// The v2 acquisition can wait (queue, fetch timeout, below-floor refetch): read the setting
-		// again before sealing, and start over as v3 if it was switched on meanwhile. Spends no
-		// retry budget; the setting only ever turns v2 into v3 here, never the other way.
-		if (!postQuantum && (await postQuantumOn(options))) continue;
-		const sealed = sealFor(kc.publicKey, kc.keyId, payload, options, postQuantum);
+		// again before sealing, and start over if Always Post-Quantum was switched on meanwhile.
+		// Spends no retry budget; the setting only ever turns v2 into v3 here, never the other way.
+		if (!v3 && (await encryptionModeOf(options)) === 'postQuantum') continue;
+		const backend: MlKemBackend | undefined = v3
+			? hasNativeMlKem(options)
+				? 'native'
+				: 'noble'
+			: undefined;
+		const sealed = sealFor(kc.publicKey, kc.keyId, payload, options, backend);
 		if (!sealed) return { ok: false, error: 'hpke_seal_failed' };
+		// From here on this text has been offered to the network as v3: never v2 again.
+		if (v3) state.v3Only = true;
+		state.used.add(backend === undefined ? 'v2' : backend === 'native' ? 'v3-native' : 'v3-noble');
 		const result = await gatewayFetch(ctx, 'POST', ANALYZE_PATH, sealed.body, {
 			retryServerErrors: false,
 			timeoutMs: GATEWAY_TIMEOUT_MS,
@@ -905,11 +1015,12 @@ async function analyzeSealed(
 			plainStatus = result.status;
 		}
 
-		if (postQuantum && plainStatus !== undefined && failure.error === 'hpke_bad_version') {
+		if (v3 && plainStatus !== undefined && failure.error === 'hpke_bad_version') {
 			// v3 switched off since the keyconfig was fetched, or replicas disagree during a
 			// restart: refetch once and reseal once (a refetch without `v3` ends in
-			// hpke_pq_unavailable). A second one ends the part. Never resent as v2.
-			if (badVersionResealed) return { ...failure, error: 'hpke_pq_unavailable' };
+			// hpke_pq_unavailable / hpke_pq_withdrawn). A second one ends the part. Never resent
+			// as v2.
+			if (badVersionResealed) return pqFailure({ ...failure, error: 'hpke_pq_unavailable' }, mode);
 			badVersionResealed = true;
 			refetchKeyconfig = true;
 			continue;
@@ -945,9 +1056,10 @@ async function analyzePart(
 	filter: string[] | undefined,
 	multiPart: boolean,
 	options: AnalyzeOptions | undefined,
+	state: SendState,
 ): Promise<AnalyzeOutcome> {
 	for (let waits = 0; ; waits++) {
-		const outcome = await analyzeSealed(ctx, text, filter, options);
+		const outcome = await analyzeSealed(ctx, text, filter, options, state);
 		if (outcome.ok || outcome.error !== 'rate_limited' || !multiPart || waits >= RATE_LIMIT_WAITS) {
 			return outcome;
 		}
@@ -986,8 +1098,18 @@ export async function analyze(
 	let filter = Array.isArray(entityTypes) && entityTypes.length > 0 ? [...entityTypes] : undefined;
 	let entityFilterIgnored = false;
 	const results: Array<{ entities: Span[]; possible: PossibleSpan[] }> = [];
+	// One state for the whole text, the invalid_entities rerun included: once any send was v3,
+	// the rest of this text is v3 or nothing.
+	const state: SendState = { v3Only: false, used: new Set() };
 	for (let index = 0; index < parts.length; index++) {
-		const outcome = await analyzePart(ctx, parts[index].text, filter, parts.length > 1, options);
+		const outcome = await analyzePart(
+			ctx,
+			parts[index].text,
+			filter,
+			parts.length > 1,
+			options,
+			state,
+		);
 		if (!outcome.ok && outcome.error === 'invalid_entities' && filter !== undefined) {
 			// The gateway refused our entity-type names (version skew). Fail OPEN to complete
 			// anonymization, the privacy-safe direction, exactly once for the whole text, and flag it.
@@ -1008,7 +1130,8 @@ export async function analyze(
 		results[index] = { entities: outcome.spans, possible: outcome.possible };
 	}
 	const merged = merge(parts, results);
-	return { spans: merged.entities, possible: merged.possible, entityFilterIgnored };
+	const encryption = ENCRYPTION_ORDER.find((used) => state.used.has(used)) ?? 'v2';
+	return { spans: merged.entities, possible: merged.possible, entityFilterIgnored, encryption };
 }
 
 // ---------------------------------------------------------------------------------------------

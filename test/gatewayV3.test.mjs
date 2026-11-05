@@ -1,13 +1,22 @@
-// EXPERIMENTAL protocol v3 through gateway.ts (compiled dist/), against a fake gateway that serves
-// v2 and v3: off by default and v2 unchanged, v3 only with the reader on, fail closed without a
-// verifiable `v3` member, the bad-version budget, retries, the monotonic rule (the setting is read
-// at every send), and the delegation serial floor shared by v2, v3 and capabilities.
+// Protocol v3 through gateway.ts (compiled dist/), against a fake gateway that serves v2 and v3:
+// v2 unchanged without a reader (`standard`); Always Post-Quantum (`postQuantum`): v3 only, fail
+// closed without a verifiable `v3` member, the bad-version budget, retries, the monotonic rule
+// (the setting is read at every send); Automatic (`automatic`): v3 with native ML-KEM when the
+// keyconfig offers it, else v2, decided before the send, never v2 after a v3 attempt, with native
+// ML-KEM present (Node.js 24.7+) and absent (Node 22, or simulated with the `nativeMlKem: false`
+// seam); the `encryption` result; and the delegation serial floor shared by v2, v3 and
+// capabilities.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { beforeEach, describe, it } from 'node:test';
 
 import { capabilitiesText, json, octet } from './helpers/pgw.mjs';
-import { keyconfigV3Member, makeFakeGatewayV3 } from './helpers/pgwV3.mjs';
+import {
+	NATIVE_MLKEM,
+	NATIVE_SKIP,
+	keyconfigV3Member,
+	makeFakeGatewayV3,
+} from './helpers/pgwV3.mjs';
 
 const require = createRequire(import.meta.url);
 const G = require('../dist/nodes/Anonymizator/shared/gateway.js');
@@ -40,7 +49,8 @@ function setup(overrides = {}) {
 	return { gw, options };
 }
 
-const ON = () => true;
+const PQ = () => 'postQuantum';
+const modeOf = (on) => (on ? 'postQuantum' : 'standard');
 
 describe('post-quantum off (the default): v2 exactly as before', () => {
 	it('no reader: a v2 frame, even when the keyconfig offers v3', async () => {
@@ -52,18 +62,18 @@ describe('post-quantum off (the default): v2 exactly as before', () => {
 		assert.equal(gw.posts()[0].body.length, 13 + 32 + 256 + 16);
 	});
 
-	it('a reader that answers anything but true is off', async () => {
-		for (const value of [false, undefined, null, 'true', 1, {}]) {
+	it('a reader that answers anything but a known mode is standard (v2)', async () => {
+		for (const value of [false, true, undefined, null, 'true', 'PostQuantum', 'v3', 1, {}]) {
 			G.clearGatewayCaches();
 			const { gw, options } = setup();
-			await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: () => value });
+			await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: () => value });
 			assert.deepEqual(gw.versions(), [2], String(value));
 		}
 	});
 
 	it('off with a gateway that has no v3 at all (v3 off on the server): v2 works', async () => {
 		const { gw, options } = setup({ offerV3: false, v3Enabled: false });
-		await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: () => false });
+		await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: () => 'standard' });
 		assert.deepEqual(gw.versions(), [2]);
 	});
 
@@ -87,7 +97,7 @@ describe('post-quantum on', () => {
 		});
 		const r = await G.analyze(gw.ctx, 'my name is Ana Kovač', undefined, {
 			...options,
-			postQuantum: ON,
+			encryption: PQ,
 		});
 		assert.deepEqual(r.spans, [{ entity_type: 'PERSON', start: 11, end: 20, score: 0.9 }]);
 		assert.deepEqual(gw.versions(), [3]);
@@ -105,7 +115,7 @@ describe('post-quantum on', () => {
 		const r = await G.analyze(gw.ctx, 'abc', ['PERSON'], {
 			...options,
 			possible: true,
-			postQuantum: async () => true,
+			encryption: async () => 'postQuantum',
 		});
 		assert.deepEqual(r.possible, []);
 		assert.deepEqual(gw.versions(), [3]);
@@ -114,7 +124,7 @@ describe('post-quantum on', () => {
 	it('no v3 member: hpke_pq_unavailable, nothing sent (no fallback to v2)', async () => {
 		const { gw, options } = setup({ offerV3: false });
 		const error = await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_pq_unavailable',
 		);
 		assert.equal(error.httpCode, 200);
@@ -138,7 +148,7 @@ describe('post-quantum on', () => {
 			},
 		});
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_unverified_keyconfig',
 		);
 		assert.equal(gw.posts().length, 0);
@@ -161,7 +171,7 @@ describe('post-quantum on', () => {
 					}),
 			});
 			await rejects(
-				G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+				G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 				'hpke_stale_keyconfig',
 			);
 			assert.equal(gw.posts().length, 0);
@@ -182,7 +192,7 @@ describe('post-quantum on', () => {
 					}),
 			});
 			await rejects(
-				G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+				G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 				'hpke_no_usable_key',
 			);
 			assert.equal(gw.posts().length, 0);
@@ -201,7 +211,7 @@ describe('post-quantum on', () => {
 			},
 		});
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_seal_failed',
 		);
 		assert.equal(gw.posts().length, 0);
@@ -210,7 +220,7 @@ describe('post-quantum on', () => {
 	it('the keyconfig 503 hpke_not_configured is passed on unchanged', async () => {
 		const { gw, options } = setup({ keyconfig: () => json(503, { error: 'hpke_not_configured' }) });
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_not_configured',
 		);
 		assert.equal(gw.posts().length, 0);
@@ -225,7 +235,7 @@ describe('post-quantum on', () => {
 			},
 		});
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_bad_response',
 		);
 	});
@@ -235,7 +245,7 @@ describe('post-quantum on', () => {
 			analyzeV3: (opened) => octet(200, opened.seal({ error: 'invalid_payload' })),
 		});
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'invalid_payload',
 		);
 		assert.deepEqual(gw.versions(), [3]);
@@ -249,7 +259,7 @@ describe('post-quantum on', () => {
 					opened.seal(opened.payload.entities ? { error: 'invalid_entities' } : { entities: [] }),
 				),
 		});
-		const r = await G.analyze(gw.ctx, 'text', ['PERSON'], { ...options, postQuantum: ON });
+		const r = await G.analyze(gw.ctx, 'text', ['PERSON'], { ...options, encryption: PQ });
 		assert.equal(r.entityFilterIgnored, true);
 		assert.deepEqual(gw.versions(), [3, 3]);
 	});
@@ -259,7 +269,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 	it('bad version, refetch with v3, reseal, bad version again: hpke_pq_unavailable after exactly two POSTs', async () => {
 		const { gw, options } = setup({ v3Enabled: false });
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_pq_unavailable',
 		);
 		assert.deepEqual(gw.versions(), [3, 3]);
@@ -274,7 +284,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 				return await original.call(this, name, request);
 			})(gw.ctx.helpers.httpRequestWithAuthentication);
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 			'hpke_pq_unavailable',
 		);
 		assert.deepEqual(gw.versions(), [3]);
@@ -293,7 +303,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 			}
 			return response;
 		};
-		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON });
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ });
 		assert.deepEqual(r.spans, []);
 		assert.deepEqual(gw.versions(), [3, 3]);
 	});
@@ -317,7 +327,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 			}
 			return await helper.call(this, name, request);
 		};
-		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON });
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ });
 		assert.deepEqual(r.spans, []);
 		assert.deepEqual(gw.versions(), [3, 3, 3]);
 		assert.equal(gw.gets('/v1/keyconfig').length, 3);
@@ -335,7 +345,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 					}
 					return await helper.call(this, name, request);
 				})(gw.ctx.helpers.httpRequestWithAuthentication);
-			await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON });
+			await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ });
 			const [a, b] = gw.posts();
 			assert.deepEqual(gw.versions(), [3, 3]);
 			assert.notEqual(
@@ -347,7 +357,7 @@ describe('post-quantum on: retries and the bad-version budget', () => {
 		{
 			const { gw, options } = setup({ analyzeV3: () => json(409, { error: 'hpke_replay' }) });
 			await rejects(
-				G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: ON }),
+				G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ }),
 				'hpke_replay',
 			);
 			assert.deepEqual(gw.versions(), [3]);
@@ -365,7 +375,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 	it('switched on mid-run: no part sent after the switch is v2', async () => {
 		const { gw, options } = setup();
 		let sends = 0;
-		const reader = () => sends >= 1;
+		const reader = () => modeOf(sends >= 1);
 		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
 		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
 			if (request.method === 'POST') sends += 1;
@@ -373,7 +383,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 		};
 		// Three parts of a text over the bundled cap (parts of 8000 code points).
 		const text = ['a'.repeat(7000), 'b'.repeat(7000), 'c'.repeat(7000)].join('\n');
-		await G.analyze(gw.ctx, text, undefined, { ...options, postQuantum: reader });
+		await G.analyze(gw.ctx, text, undefined, { ...options, encryption: reader });
 		assert.deepEqual(gw.versions(), [2, 3, 3]);
 	});
 
@@ -386,7 +396,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 			if (request.method === 'POST') on = true;
 			return response;
 		};
-		await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: () => on });
+		await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: () => modeOf(on) });
 		assert.deepEqual(gw.versions(), [2, 3]);
 	});
 
@@ -401,7 +411,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 		};
 		const reader = () => {
 			state.reads += 1;
-			return state.on;
+			return modeOf(state.on);
 		};
 		return { state, reader };
 	}
@@ -409,7 +419,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 	it('switched on during the v2 keyconfig fetch: the part is sealed as v3, never v2', async () => {
 		const { gw, options } = setup();
 		const { state, reader } = switchOnDuringKeyconfigFetch(gw);
-		await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader });
+		await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: reader });
 		assert.deepEqual(gw.versions(), [3]);
 		assert.equal(gw.posts().length, 1);
 		assert.ok(state.reads >= 2, 'the setting is read again after the v2 acquisition');
@@ -419,7 +429,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 		const { gw, options } = setup({ offerV3: false });
 		const { reader } = switchOnDuringKeyconfigFetch(gw);
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader }),
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: reader }),
 			'hpke_pq_unavailable',
 		);
 		assert.equal(gw.posts().length, 0);
@@ -439,7 +449,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 			}
 			return await helper.call(this, name, request);
 		};
-		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, postQuantum: reader });
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: reader });
 		assert.deepEqual(r.spans, []);
 		assert.deepEqual(gw.versions(), [3, 3]);
 	});
@@ -449,7 +459,7 @@ describe('post-quantum on: the setting is read at every send (monotonic rule)', 
 		await assert.rejects(
 			G.analyze(gw.ctx, 'text', undefined, {
 				...options,
-				postQuantum: () => {
+				encryption: () => {
 					throw new Error('credentials unreadable');
 				},
 			}),
@@ -493,7 +503,7 @@ describe('the delegation serial floor, shared by v2, v3 and capabilities', () =>
 			}
 			return await original.call(this, name, request);
 		};
-		const first = await G.acquireKeyconfigV3(gw.ctx, { ...options, postQuantum: ON });
+		const first = await G.acquireKeyconfigV3(gw.ctx, { ...options, encryption: PQ });
 		assert.equal(first.serial, N + 1);
 		assert.equal(G.delegationFloor(options), N + 1);
 
@@ -509,7 +519,7 @@ describe('the delegation serial floor, shared by v2, v3 and capabilities', () =>
 		const later = { ...options, nowSeconds: ref.now };
 		const before = gw.gets('/v1/keyconfig').length;
 		await rejects(
-			G.analyze(gw.ctx, 'text', undefined, { ...later, postQuantum: ON }),
+			G.analyze(gw.ctx, 'text', undefined, { ...later, encryption: PQ }),
 			'hpke_unverified_keyconfig',
 		);
 		assert.equal(gw.gets('/v1/keyconfig').length, before + 2);
@@ -559,5 +569,341 @@ describe('the delegation serial floor, shared by v2, v3 and capabilities', () =>
 		await G.acquireKeyconfig(gw.ctx, options);
 		assert.equal(G.delegationFloor(options), N);
 		await rejects(G.acquireKeyconfigV3(gw.ctx, options), 'hpke_unverified_keyconfig');
+	});
+});
+
+const AUTO = () => 'automatic';
+const NO_NATIVE = { nativeMlKem: false };
+const keyconfigGets = (gw) => gw.gets('/v1/keyconfig').length;
+
+describe('Always Post-Quantum: which ML-KEM, reported in `encryption`', () => {
+	it(`native where Node.js has it (${NATIVE_MLKEM ? 'here: v3-native' : 'here: v3-noble'})`, async () => {
+		const { gw, options } = setup();
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: PQ });
+		assert.deepEqual(gw.versions(), [3]);
+		assert.equal(r.encryption, NATIVE_MLKEM ? 'v3-native' : 'v3-noble');
+	});
+
+	it('the vendored ML-KEM where Node.js has none (simulated): v3-noble, the gateway opens it', async () => {
+		const { gw, options } = setup();
+		const r = await G.analyze(gw.ctx, 'text', undefined, {
+			...options,
+			...NO_NATIVE,
+			encryption: PQ,
+		});
+		assert.deepEqual(gw.versions(), [3]);
+		assert.equal(gw.v3.results[0].code, undefined);
+		assert.equal(r.encryption, 'v3-noble');
+	});
+
+	it('without a reader, or standard: v2', async () => {
+		const { gw, options } = setup();
+		assert.equal((await G.analyze(gw.ctx, 'a', undefined, options)).encryption, 'v2');
+		const r = await G.analyze(gw.ctx, 'b', undefined, { ...options, encryption: () => 'standard' });
+		assert.equal(r.encryption, 'v2');
+		assert.deepEqual(gw.versions(), [2, 2]);
+	});
+});
+
+describe('Automatic, native ML-KEM absent (Node 22, or simulated): always v2, nothing of v3 runs', () => {
+	const variants = [['simulated', NO_NATIVE]];
+	if (!NATIVE_MLKEM) variants.push(['this Node.js', {}]);
+	for (const [label, seam] of variants) {
+		it(`${label}: the gateway offers v3, the text still goes as v2`, async () => {
+			const { gw, options } = setup();
+			const r = await G.analyze(gw.ctx, 'my name is Ana', undefined, {
+				...options,
+				...seam,
+				encryption: AUTO,
+			});
+			assert.deepEqual(gw.versions(), [2]);
+			assert.equal(gw.v3.frames.length, 0);
+			assert.equal(r.encryption, 'v2');
+			assert.equal(keyconfigGets(gw), 1);
+		});
+
+		it(`${label}: a long text in parts, every part v2`, async () => {
+			const { gw, options } = setup();
+			const text = ['a'.repeat(7000), 'b'.repeat(7000), 'c'.repeat(7000)].join('\n');
+			const r = await G.analyze(gw.ctx, text, undefined, { ...options, ...seam, encryption: AUTO });
+			assert.deepEqual(gw.versions(), [2, 2, 2]);
+			assert.equal(r.encryption, 'v2');
+		});
+	}
+});
+
+describe('Automatic, native ML-KEM present', { skip: NATIVE_SKIP }, () => {
+	it('the gateway offers v3: v3 with the native ML-KEM, one keyconfig fetch, encryption v3-native', async () => {
+		const { gw, options } = setup({
+			analyzeV3: (opened) =>
+				octet(
+					200,
+					opened.seal({ entities: [{ entity_type: 'PERSON', start: 11, end: 14, score: 0.9 }] }),
+				),
+		});
+		const r = await G.analyze(gw.ctx, 'my name is Ana', undefined, {
+			...options,
+			encryption: AUTO,
+		});
+		assert.deepEqual(gw.versions(), [3]);
+		assert.equal(gw.v3.results[0].payload.text, 'my name is Ana');
+		assert.deepEqual(r.spans, [{ entity_type: 'PERSON', start: 11, end: 14, score: 0.9 }]);
+		assert.equal(r.encryption, 'v3-native');
+		assert.equal(keyconfigGets(gw), 1);
+		// The cached document serves the next text too: still one fetch, still v3.
+		await G.analyze(gw.ctx, 'my name is Bob', undefined, { ...options, encryption: AUTO });
+		assert.deepEqual(gw.versions(), [3, 3]);
+		assert.equal(keyconfigGets(gw), 1);
+	});
+
+	it('no v3 member: v2, from the same single keyconfig fetch, and cached for the next text', async () => {
+		const { gw, options } = setup({ offerV3: false });
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO });
+		assert.deepEqual(gw.versions(), [2]);
+		assert.equal(r.encryption, 'v2');
+		await G.analyze(gw.ctx, 'more', undefined, { ...options, encryption: AUTO });
+		assert.deepEqual(gw.versions(), [2, 2]);
+		assert.equal(keyconfigGets(gw), 1);
+	});
+
+	it('a v3 member that does not verify, is stale or has no usable key: v2 (v2 never depends on v3)', async () => {
+		const pkOf = (gw) => gw.v3.recipient.keys.get(1000001).expanded.pk;
+		const members = [
+			(gw) => (state) => {
+				const m = keyconfigV3Member(state.chain, {
+					now: NOW,
+					keys: [{ keyId: 1000001, pk: pkOf(gw), notAfter: NOW + 3600 }],
+				});
+				return { ...m, keyconfig_sig: m.delegation_sig };
+			},
+			(gw) => (state) =>
+				keyconfigV3Member(state.chain, {
+					now: NOW,
+					issuedAt: NOW - 3600,
+					keys: [{ keyId: 1000001, pk: pkOf(gw), notAfter: NOW + 3600 }],
+				}),
+			(gw) => (state) =>
+				keyconfigV3Member(state.chain, {
+					now: NOW,
+					keys: [{ keyId: 1000001, pk: pkOf(gw), notAfter: NOW + 200 }],
+				}),
+			() => () => ({ delegation: 1, keyconfig: [] }),
+		];
+		for (const make of members) {
+			G.clearGatewayCaches();
+			let gw;
+			const built = setup({ v3Member: (state) => make(gw)(state) });
+			gw = built.gw;
+			const r = await G.analyze(gw.ctx, 'text', undefined, { ...built.options, encryption: AUTO });
+			assert.deepEqual(gw.versions(), [2]);
+			assert.equal(r.encryption, 'v2');
+		}
+	});
+
+	it('a v2 keyconfig that does not verify fails as with standard encryption, nothing sent', async () => {
+		const { gw, options } = setup({ keyconfig: () => json(200, { version: 2 }) });
+		await rejects(
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO }),
+			'hpke_unverified_keyconfig',
+		);
+		assert.equal(gw.posts().length, 0);
+	});
+
+	it('a low-order pk_X in a verified v3 key: hpke_seal_failed, nothing sent', async () => {
+		const { gw, options } = setup({
+			v3Member: (state) => {
+				const pk = Buffer.from(gw.v3.recipient.keys.get(1000001).expanded.pk);
+				pk.fill(0, 1184);
+				return keyconfigV3Member(state.chain, {
+					now: NOW,
+					keys: [{ keyId: 1000001, pk, notAfter: NOW + 3600 }],
+				});
+			},
+		});
+		await rejects(
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO }),
+			'hpke_seal_failed',
+		);
+		assert.equal(gw.posts().length, 0);
+	});
+
+	it('never v2 after a v3 attempt: bad version, the refetch has no v3: hpke_pq_withdrawn, one POST', async () => {
+		const { gw, options } = setup({ v3Enabled: false });
+		gw.ctx.helpers.httpRequestWithAuthentication = ((original) =>
+			async function (name, request) {
+				if (request.method === 'POST') gw.v3.offer = false;
+				return await original.call(this, name, request);
+			})(gw.ctx.helpers.httpRequestWithAuthentication);
+		await rejects(
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO }),
+			'hpke_pq_withdrawn',
+		);
+		assert.deepEqual(gw.versions(), [3]);
+	});
+
+	it('never v2 after a v3 attempt: bad version twice: hpke_pq_withdrawn after exactly two v3 POSTs', async () => {
+		const { gw, options } = setup({ v3Enabled: false });
+		await rejects(
+			G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO }),
+			'hpke_pq_withdrawn',
+		);
+		assert.deepEqual(gw.versions(), [3, 3]);
+	});
+
+	it('bad version once, then v3 again: the reseal goes through as v3', async () => {
+		const { gw, options } = setup();
+		let first = true;
+		gw.v3.enabled = false;
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			const response = await helper.call(this, name, request);
+			if (request.method === 'POST' && first) {
+				first = false;
+				gw.v3.enabled = true;
+			}
+			return response;
+		};
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO });
+		assert.deepEqual(gw.versions(), [3, 3]);
+		assert.equal(r.encryption, 'v3-native');
+	});
+
+	it('retries after a v3 send stay v3: busy, then unknown key with the keyconfig withdrawn', async () => {
+		{
+			const { gw, options } = setup();
+			let n = 0;
+			const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+			gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+				if (request.method === 'POST' && n++ === 0) {
+					gw.requests.push(request);
+					return json(503, { error: 'busy' });
+				}
+				return await helper.call(this, name, request);
+			};
+			await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO });
+			assert.deepEqual(gw.versions(), [3, 3]);
+		}
+		G.clearGatewayCaches();
+		{
+			// The key rotated and the refetched document has no v3 any more: not v2, withdrawn.
+			const { gw, options } = setup();
+			const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+			gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+				if (request.method === 'POST') {
+					gw.requests.push(request);
+					gw.v3.offer = false;
+					return json(400, { error: 'hpke_unknown_key' });
+				}
+				return await helper.call(this, name, request);
+			};
+			await rejects(
+				G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO }),
+				'hpke_pq_withdrawn',
+			);
+			assert.deepEqual(gw.versions(), [3]);
+		}
+	});
+
+	it('a long text: v3 withdrawn after part 1 ends the text at part 2, no part sent as v2', async () => {
+		const { gw, options } = setup();
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			const response = await helper.call(this, name, request);
+			if (request.method === 'POST') {
+				// After the first part: v3 switched off on the server and gone from the keyconfig.
+				gw.v3.enabled = false;
+				gw.v3.offer = false;
+			}
+			return response;
+		};
+		const text = ['a'.repeat(7000), 'b'.repeat(7000), 'c'.repeat(7000)].join('\n');
+		const error = await rejects(
+			G.analyze(gw.ctx, text, undefined, { ...options, encryption: AUTO }),
+			'hpke_pq_withdrawn',
+		);
+		assert.equal(error.failedPart, 2);
+		assert.ok(
+			gw.versions().every((v) => v === 3),
+			JSON.stringify(gw.versions()),
+		);
+	});
+
+	it('invalid_entities with a filter: the rerun of the whole text stays v3', async () => {
+		const { gw, options } = setup({
+			analyzeV3: (opened) =>
+				octet(
+					200,
+					opened.seal(opened.payload.entities ? { error: 'invalid_entities' } : { entities: [] }),
+				),
+		});
+		const r = await G.analyze(gw.ctx, 'text', ['PERSON'], { ...options, encryption: AUTO });
+		assert.equal(r.entityFilterIgnored, true);
+		assert.deepEqual(gw.versions(), [3, 3]);
+		assert.equal(r.encryption, 'v3-native');
+	});
+
+	it('switched to Always Post-Quantum mid-text with a gateway without v3: v2 part, then hpke_pq_unavailable', async () => {
+		const { gw, options } = setup({ offerV3: false });
+		let sends = 0;
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			if (request.method === 'POST') sends += 1;
+			return await helper.call(this, name, request);
+		};
+		const text = ['a'.repeat(7000), 'b'.repeat(7000)].join('\n');
+		await rejects(
+			G.analyze(gw.ctx, text, undefined, {
+				...options,
+				encryption: () => (sends >= 1 ? 'postQuantum' : 'automatic'),
+			}),
+			'hpke_pq_unavailable',
+		);
+		assert.deepEqual(gw.versions(), [2]);
+	});
+
+	it('`encryption` is the weakest of the sends: a v2 part makes the text v2', async () => {
+		const { gw, options } = setup();
+		let sends = 0;
+		const helper = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			if (request.method === 'POST') sends += 1;
+			return await helper.call(this, name, request);
+		};
+		const text = ['a'.repeat(7000), 'b'.repeat(7000), 'c'.repeat(7000)].join('\n');
+		const r = await G.analyze(gw.ctx, text, undefined, {
+			...options,
+			encryption: () => (sends >= 1 ? 'automatic' : 'standard'),
+		});
+		assert.deepEqual(gw.versions(), [2, 3, 3]);
+		assert.equal(r.encryption, 'v2');
+	});
+
+	it('the Automatic acquisition raises the shared delegation floor through v3 too', async () => {
+		const N = NOW - 86400;
+		const { gw, options } = setup();
+		const original = gw.ctx.helpers.httpRequestWithAuthentication;
+		gw.ctx.helpers.httpRequestWithAuthentication = async function (name, request) {
+			if (request.method === 'GET' && request.url.endsWith('/v1/keyconfig')) {
+				gw.requests.push(request);
+				return json(200, {
+					...gw.config,
+					v3: keyconfigV3Member(gw.chain, {
+						now: NOW,
+						serial: N + 5,
+						keys: [
+							{
+								keyId: 1000001,
+								pk: gw.v3.recipient.keys.get(1000001).expanded.pk,
+								notAfter: NOW + 3600,
+							},
+						],
+					}),
+				});
+			}
+			return await original.call(this, name, request);
+		};
+		const r = await G.analyze(gw.ctx, 'text', undefined, { ...options, encryption: AUTO });
+		assert.equal(r.encryption, 'v3-native');
+		assert.equal(G.delegationFloor(options), N + 5);
 	});
 });

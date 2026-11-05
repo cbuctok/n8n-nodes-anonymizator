@@ -92,7 +92,8 @@ Output, one item per input item:
   "entities": [
     { "entityType": "PERSON", "placeholder": "[PERSON_6kltt]", "start": 18, "end": 32, "score": 0.85 },
     { "entityType": "EMAIL_ADDRESS", "placeholder": "[EMAIL_r01q2]", "start": 49, "end": 62, "score": 1 }
-  ]
+  ],
+  "encryption": "v3-native"
 }
 ```
 
@@ -101,6 +102,7 @@ Output, one item per input item:
 | `protectedText` | The text with placeholders. |
 | `placeholderMap` | The complete map needed to reveal this text: the existing map plus the new placeholders. Person names also get `_NAME` and `_SURNAME` entries, so an answer that mentions only "Janez" is revealed too. Retired placeholders from the existing map are kept with an empty value, so they stay retired when you pass the map back in. Empty (`{}`) for Type Only and Redacted. Left out when Include Placeholder Map is off. **It holds the real values.** |
 | `entities` | What was replaced: `entityType` (the type, such as `EMAIL_ADDRESS`, even where the placeholder is shorter), `placeholder`, `start`/`end` offsets into `protectedText`, and `score`. Never the real value. |
+| `encryption` | How the text was encrypted on its way to the gateway: `v3-native` (post-quantum, with Node.js's built-in ML-KEM), `v3-noble` (post-quantum, with the bundled ML-KEM; only with **Always Post-Quantum**), `v2` (standard encryption) or `none` (blank text, nothing was sent). For a long text sent in parts, the weakest any part or retry used. See [Encryption](#encryption-automatic-and-always-post-quantum). |
 | `entityFilterIgnored` | Present (`true`) only when the gateway refused the selected types and the node detected all types instead. |
 | `idFile` | Present only with Include ID File, for Random and Numbers in Order, and only when there is at least one ID. |
 | `possibleIds` | Present only with Include Possible IDs: `start`, `end` (offsets into `protectedText`), `value`, `kind` (`company-name`, `surname`, `title-surname`, `case-form`, or `detected` for what the gateway flagged) and `type` (the kind of ID it may be, or `null`). The values are text that is still in clear in `protectedText`. |
@@ -146,7 +148,8 @@ Output:
   "entities": [
     { "entityType": "PERSON", "start": 18, "end": 29, "score": 0.85 },
     { "entityType": "EMAIL_ADDRESS", "start": 46, "end": 67, "score": 1 }
-  ]
+  ],
+  "encryption": "v3-native"
 }
 ```
 
@@ -155,6 +158,7 @@ Output:
 | `hasPersonalData` | `true` when at least one entity was found. |
 | `entityCount` / `countsByType` | How many entities were found, in total and per type. |
 | `entities` | `start` and `end` are offsets into the **original** text, in JavaScript string units (UTF-16), so `text.slice(start, end)` is the value. Leading and trailing spaces are trimmed off, and a detection of only spaces is dropped. Of overlapping detections, the one starting first (the longest, at the same start) is kept. A name the gateway finds followed by a legal form ("Modra d.o.o.") is reported as one `COMPANY`, legal form included, as Protect replaces it, and so is the same detected name elsewhere in the text; this happens before Ignore Terms, so an ignored "Modra" does not hide "Modra d.o.o.". A detection whose type the gateway sent malformed is reported as `PII`. |
+| `encryption` | As in Protect. |
 | `entityFilterIgnored` | As in Protect. |
 | `possibleIds` | Present only with Include Possible IDs: `entityType`, `start`, `end` (offsets into the original text), and `value` only with Include Values. |
 
@@ -198,8 +202,8 @@ user portal. Paste the key into the credential's **API Key** field.
 | Field | Required | Notes |
 | --- | --- | --- |
 | API Key | Yes | Stored as a password field and sent as a bearer token. Only Protect and Detect use it. |
-| Show Experimental Options | No | Off by default. Shows the experimental option below. |
-| Post-Quantum Encryption (Experimental) | No | Off by default. See [Experimental: post-quantum encryption](#experimental-post-quantum-encryption). |
+| Show Experimental Options | No | Off by default. Shows the **Encryption** setting below. Turning it off sets Encryption back to Automatic. |
+| Encryption | No | **Automatic** (default) or **Always Post-Quantum (Experimental)**. See [Encryption](#encryption-automatic-and-always-post-quantum). |
 
 There is no base URL field: the node always talks to `https://anon.prosecco37.com`, because it only
 trusts encryption keys signed through a chain from the Anonymizator root keys built into the node.
@@ -211,22 +215,63 @@ you save the credential rather than on the first run:
 - **The key is valid but has no access to Anonymizator (missing role)**: check in the user portal
   that the key belongs to an account with Anonymizator access.
 
-### Experimental: post-quantum encryption
+The credential test checks standard encryption only. It cannot run the node's code, so it neither
+tries post-quantum encryption nor tells you which encryption Protect and Detect will use; the
+`encryption` field of their output does.
 
-Not for production use. With **Show Experimental Options** and **Post-Quantum Encryption
-(Experimental)** both on, Protect and Detect encrypt the text with the gateway's experimental
-protocol version 3, which adds a post-quantum key exchange (X-Wing: X25519 together with
-ML-KEM-768) to protect recorded traffic against a future quantum computer. Everything else stays
-the same. The protocol, its wire format and this option may change or go away.
+### Encryption: Automatic and Always Post-Quantum
 
-- If the gateway does not offer it, the item fails with "Post-quantum encryption is on, but the
-  Anonymizator gateway doesn't offer it, so nothing was sent". The text is **never** sent with
-  standard encryption instead. Turn the option off to use standard encryption.
-- The credential test checks standard encryption only, so it can pass while the option fails.
-- The post-quantum part (ML-KEM-768 and SHA-3) is a vendored copy of the `@noble/post-quantum` and
-  `@noble/hashes` libraries, which have not been independently audited for this use; the X25519
-  part uses Node.js's own crypto, as standard encryption does.
-- Turning **Show Experimental Options** off also turns the option off.
+Protect and Detect always encrypt the text for the gateway with HPKE (RFC 9180), so the CDN and the
+proxies in front of the gateway see only ciphertext. The gateway offers two protocol versions:
+
+- **Standard** (protocol version 2): an X25519 key exchange.
+- **Post-quantum** (protocol version 3): the hybrid X-Wing key exchange, X25519 together with
+  ML-KEM-768, so that recorded traffic stays protected even against a future quantum computer, and
+  never weaker than standard. Everything else (the signed keys, padding, the answer) is the same.
+
+The credential's **Encryption** setting decides which one is used:
+
+| Encryption | n8n's Node.js has ML-KEM built in (24.7.0 and later) | n8n's Node.js has none (Node.js 22 and older) |
+| --- | --- | --- |
+| **Automatic** (default) | Post-quantum when the gateway offers it, else standard. `encryption: "v3-native"` or `"v2"`. | Standard. `encryption: "v2"`. |
+| **Always Post-Quantum (Experimental)** | Post-quantum, or the item fails. `encryption: "v3-native"`. | Post-quantum with the bundled ML-KEM, or the item fails. `encryption: "v3-noble"`. |
+
+**Automatic** is the default and needs nothing from you. It never uses the bundled post-quantum
+code: post-quantum encryption is used only with the ML-KEM-768 of Node.js itself (OpenSSL 3.5), which
+the node detects by trying it, not by reading the version number. The choice is made before the
+text is sent, from the gateway's signed key configuration: post-quantum when it carries a
+post-quantum key that passes every check, standard otherwise (also when the post-quantum key fails a
+check; standard encryption never depends on it). Once any part of a text, or any attempt, has gone
+out post-quantum, the rest of that text and every retry go out post-quantum too, or not at all: a
+text is never sent again with standard encryption after a post-quantum attempt. If the gateway stops
+offering post-quantum encryption in that moment, the item stops with "The Anonymizator gateway
+stopped offering post-quantum encryption while this text was being sent"; run it again and the node
+chooses afresh. Automatic is opportunistic: it uses post-quantum encryption when it can and does not
+insist on it. Someone who can change the gateway's answers on the way (for example a TLS-inspecting
+proxy) could hide the post-quantum key and so make Automatic use standard encryption, which is as
+strong as before this setting existed. To refuse standard encryption, use Always Post-Quantum.
+
+**Always Post-Quantum (Experimental)** is shown after turning on **Show Experimental Options**. Not
+for production use:
+
+- Every request is post-quantum. If the gateway does not offer it, the item fails with
+  "Post-quantum encryption is on, but the Anonymizator gateway doesn't offer it, so nothing was
+  sent". The text is **never** sent with standard encryption instead.
+- On a Node.js without ML-KEM of its own (Node.js 22 and older), the ML-KEM-768 and SHA-3 code is a
+  bundled copy of the `@noble/post-quantum` and `@noble/hashes` libraries, which have not been
+  independently audited for this use (`encryption: "v3-noble"`). The X25519 part always uses
+  Node.js's own crypto, as standard encryption does.
+- The post-quantum protocol, its wire format and this setting may still change: the X-Wing and
+  HPKE post-quantum specifications are Internet-Drafts.
+- Turning **Show Experimental Options** off hides the setting and sets it back to Automatic.
+
+Credentials saved with version 0.4.0 or earlier need no change: those with the experimental
+**Post-Quantum Encryption (Experimental)** option on (and Show Experimental Options on) are now
+**Always Post-Quantum**; all others are **Automatic**.
+
+Which Node.js n8n runs on depends on how it is installed: the official n8n Docker images bring their
+own, and an npm install uses the host's (`node --version`). The `encryption` field of each Protect or
+Detect output item shows what was actually used.
 
 ## Compatibility
 
@@ -235,6 +280,9 @@ the same. The protocol, its wire format and this option may change or go away.
   of recent n8n releases (themed icons, `NodeConnectionTypes`, tool usage), so old 1.x releases are
   not expected to work; a minimum version has not been established.
 - No runtime dependencies.
+- Node.js: whatever your n8n supports. With Node.js 24.7.0 or later (built-in ML-KEM-768), the
+  default **Automatic** encryption is post-quantum where the gateway offers it; on older Node.js it
+  is standard encryption. See [Encryption](#encryption-automatic-and-always-post-quantum).
 - The n8n host must reach `https://anon.prosecco37.com` over HTTPS, and its clock must be right to
   within a minute: requests carry a timestamp and the gateway refuses stale ones.
 - Usable as an AI Agent tool (`usableAsTool`). n8n 2.x generates the tool variant automatically; no
@@ -441,11 +489,11 @@ any other endpoint.
 
 | Sent to the gateway | When | Notes |
 | --- | --- | --- |
-| `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process (sooner when the cached copy no longer checks out), plus once more when the gateway rotates its key, one retry after a server error, and one more two seconds later when the gateway is part-way through renewing its signing key (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed key configuration, checked through a signed chain from the root keys built into the node before anything else is sent. |
+| `GET /v1/keyconfig` with your API key as `Authorization: Bearer ...` | When you test or save the credential; otherwise at most once every 10 minutes per n8n process (sooner when the cached copy no longer checks out), plus once more when the gateway rotates its key, one retry after a server error, and one more two seconds later when the gateway is part-way through renewing its signing key (a failed answer is never cached, so it is fetched again for the next item) | No body. The answer is the gateway's signed key configuration (a standard and, when the gateway offers it, a post-quantum key), checked through a signed chain from the root keys built into the node before anything else is sent. One answer serves both encryptions. |
 | `GET /v1/capabilities` with your API key as `Authorization: Bearer ...` | When Protect or Detect runs with non-blank text, and when the editor loads the **Entity Type Names or IDs** list once a credential is selected (without one the built-in list is shown and nothing is sent); at most once every 5 minutes per n8n process, and after a failed attempt not again for 5 minutes (a rejected API key or a missing credential does not count as an attempt, so it does not hold back other credentials) | No body. The answer is the gateway's signed list of supported entity types, their names and groups, the text limit and the review-only types, checked through the same chain. It can only add types to the node's built-in list; if it cannot be loaded or checked, the built-in list and limit are used and nothing else changes. |
-| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text, or once per part for a text longer than the gateway's per-request limit (parts are sent one after another, each encrypted separately; see [Long texts](#long-texts-how-the-node-splits-them)), and once more for a part the gateway rate-limited, after the wait it asks for; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key. |
+| `POST /v1/analyze` with your API key as `Authorization: Bearer ...` | Once per item with non-blank text, or once per part for a text longer than the gateway's per-request limit (parts are sent one after another, each encrypted separately; see [Long texts](#long-texts-how-the-node-splits-them)), and once more for a part the gateway rate-limited, after the wait it asks for; a second time, freshly encrypted, after a key rotation or a server error (one second later; an encrypted answer is retried only when it says the gateway was busy or failed internally); once more without the type list when the gateway refuses the selected types | The body is HPKE-encrypted (RFC 9180) to the verified key: post-quantum (protocol version 3) or standard (version 2), as the [Encryption](#encryption-automatic-and-always-post-quantum) setting decides before the text is sent. |
 | Inside the encrypted body | | The **Text** parameter exactly as given (or, for a long text, one part of it); with Selected Types (unless every built-in type is selected), exactly the selected entity types; with **Include Possible IDs**, and only when the gateway's capabilities list review-only types, the flag `"possible": true`. Padded with spaces to a fixed size bucket, so the body length does not track the text length. |
-| In the clear, in the request frame | | A version byte, the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key (with the experimental post-quantum option, the 1,120-byte X-Wing key encapsulation instead, and up to one more resend after the gateway answers that it does not accept protocol version 3). |
+| In the clear, in the request frame | | A version byte (2 or 3), the gateway key id, the current time in seconds (the gateway refuses stale requests) and a one-time public key (32 bytes; with post-quantum encryption the 1,120-byte X-Wing key encapsulation instead, and up to one more resend, post-quantum again, after the gateway answers that it does not accept protocol version 3). |
 | In the clear, as HTTP headers | | `Content-Type`, `Accept`, `Authorization`, and the standard headers n8n's HTTP helper adds. |
 
 Never sent anywhere:
@@ -467,7 +515,8 @@ server; what it can guarantee is the list above.
 ## Privacy notes
 
 - **What leaves n8n:** only the text of Protect and Detect, encrypted with HPKE (RFC 9180) to the
-  gateway's current key; see [What leaves n8n](#what-leaves-n8n) for the details. Network
+  gateway's current key (post-quantum where n8n's Node.js and the gateway both support it; see
+  [Encryption](#encryption-automatic-and-always-post-quantum)); see [What leaves n8n](#what-leaves-n8n) for the details. Network
   intermediaries, including the CDN in front of the gateway, see ciphertext; they still see the
   API key, the timing and the approximate size of each request and answer (bodies are padded to
   coarse size classes). Before sending, the node checks the gateway's key through a signed chain
@@ -537,6 +586,11 @@ to the gateway for detection. Neither makes text anonymous on its own.
 
 ## Version history
 
+- **0.5.0** (2026-11-05): (planned as 0.5.0) post-quantum encryption by default where possible: a new
+  credential setting **Encryption**, **Automatic** by default (post-quantum with Node.js's built-in
+  ML-KEM-768 when the gateway offers it, standard otherwise; never the bundled ML-KEM), and the
+  former experimental option as **Always Post-Quantum (Experimental)**; a new `encryption` output
+  field on **Protect** and **Detect**.
 - **0.4.0** (2026-11-01): an experimental, off-by-default **Post-Quantum Encryption (Experimental)**
   credential option behind **Show Experimental Options** (the gateway's protocol version 3, X-Wing;
   no runtime dependencies); the last remnants of the gateway's protocol v1 removed.
