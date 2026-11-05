@@ -36,7 +36,7 @@
 #      token is used instead — no secret ever touches your repo settings.
 #
 # A package that does not exist on npm yet cannot have a trusted publisher.
-# The very first version may have to be published by hand (see AGENTS.md).
+# The very first version may have to be published by hand (see docs/agents/commands-and-releasing.md).
 #
 # ─── TAG CONVENTION ────────────────────────────────────────────────────────────
 #
