@@ -1,6 +1,8 @@
 // Structural checks on the built package (run after `npm run build`). Never shipped.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -11,7 +13,13 @@ test('package.json n8n entries point at built files', () => {
 		assert.doesNotThrow(() => require(`../${path}`), path);
 	}
 	// NOTICE carries the attribution for the code ported from the Anonymizator extension.
-	assert.deepEqual(pkg.files, ['dist', 'NOTICE']);
+	assert.deepEqual(pkg.files, [
+		'dist',
+		'!dist/**/*.map',
+		'!dist/**/*.d.ts',
+		'!dist/**/*.tsbuildinfo',
+		'NOTICE',
+	]);
 	assert.equal(pkg.dependencies, undefined);
 });
 
@@ -69,4 +77,32 @@ test('codex alias lists search terms for the nodes panel', () => {
 
 test('package.json points bug reports at GitHub issues', () => {
 	assert.equal(pkg.bugs.url, 'https://github.com/cbuctok/n8n-nodes-anonymizator/issues');
+});
+
+// 2026-11-10 (WEB2-7): maps, declarations and build info stay out of the tarball; every runtime
+// file the n8n entries need stays in.
+test('npm pack file list: no maps, declarations or build info; entries and NOTICE present', () => {
+	const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+		cwd: new URL('..', import.meta.url),
+		encoding: 'utf8',
+	});
+	const paths = JSON.parse(out)[0].files.map((f) => f.path);
+	assert.deepEqual(
+		paths.filter((p) => /\.(map|d\.ts|tsbuildinfo)$/.test(p)),
+		[],
+	);
+	for (const need of [...pkg.n8n.nodes, ...pkg.n8n.credentials, 'NOTICE', 'package.json']) {
+		assert.ok(paths.includes(need), `${need} must still ship`);
+	}
+	assert.ok(paths.some((p) => /nodes\/Anonymizator\/.*\.js$/.test(p)));
+});
+
+// 2026-11-10 (WEB2-4): every action in the workflows is pinned to a full commit SHA.
+test('workflow actions are pinned to commit SHAs', () => {
+	const dir = new URL('../.github/workflows/', import.meta.url);
+	for (const f of readdirSync(dir)) {
+		for (const m of readFileSync(new URL(f, dir), 'utf8').matchAll(/^\s*-?\s*uses:\s*(\S+)/gm)) {
+			assert.match(m[1], /@[0-9a-f]{40}$/, `${f}: ${m[1]}`);
+		}
+	}
 });
