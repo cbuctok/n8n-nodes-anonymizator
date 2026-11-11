@@ -149,7 +149,7 @@ describe('the vendored code is clean for the scanner and has no runtime dependen
 		const pkg = JSON.parse(read('package.json').toString('utf8'));
 		assert.equal(pkg.dependencies, undefined);
 		assert.deepEqual(pkg.peerDependencies, { 'n8n-workflow': '*' });
-		assert.deepEqual(pkg.files, ['dist', 'NOTICE']);
+		assert.deepEqual(pkg.files, ['dist', '!dist/**/*.map', '!dist/**/*.d.ts', '!dist/**/*.tsbuildinfo', 'NOTICE']);
 		// The generator parses with the project's own TypeScript; the lock records its version.
 		assert.equal(LOCK.generator.typescript, require('typescript').version);
 	});

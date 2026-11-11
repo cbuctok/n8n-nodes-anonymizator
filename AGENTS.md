@@ -59,7 +59,8 @@ install notes and the full release procedure: `docs/agents/commands-and-releasin
 | `npm run e2e` | Built node in a real Docker n8n (`n8n:up` first; `n8n:reset` before believing a run). |
 | `npm run release` | Checks, bump, changelog, commit, tag, **push**. Outward-facing: only when the user asks. |
 
-- Install with a plain `npm ci`; never `--force`. `npm audit fix` and `overrides` are banned (the
+- Install with a plain `npm ci`; never `--force`. The publish job alone uses
+  `npm ci --ignore-scripts` (it holds the npm identity token; see `publish.yml`). `npm audit fix` and `overrides` are banned (the
   first broke judgment's lint, the second fails `no-overrides-field`).
 - Prettier is never run by a script: `npx prettier --write <file>` by hand on `.ts`/`.mjs`
   (`.prettierrc.js`: tabs, single quotes, width 100). Markdown is not prettier-formatted.

@@ -26,7 +26,7 @@
 #        Repository owner: cbuctok
 #        Repository name:  n8n-nodes-anonymizator
 #        Workflow name:    publish.yml
-#        Environment:      (leave blank — this job declares no environment)
+#        Environment:      npm-publish   (must equal the job's `environment:` below)
 #   4. Enable BOTH "Allow npm stage publish" and "Allow npm publish". The second
 #      looks redundant for a staged-only workflow but is not: uploading to the
 #      staging area is itself a publish operation, and without it the OIDC
@@ -70,6 +70,11 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
 
+    # 2026-11-10 (WEB2-4): the job waits for the required reviewers configured on
+    # this GitHub Environment, and npm's trusted publisher is bound to the same
+    # name, so a bare tag push cannot stage a package on its own.
+    environment: npm-publish
+
     permissions:
       # Required to mint an OIDC token for npm provenance attestation.
       id-token: write
@@ -77,16 +82,31 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the next step can tell whether the tag is on master.
+          fetch-depth: 0
+
+      # 2026-11-10 (WEB2-4): any collaborator who can push a tag could otherwise
+      # stage a release from an unreviewed branch. Only commits on master ship.
+      - name: Require the tagged commit to be on master
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master || {
+            echo "::error::tag commit $GITHUB_SHA is not on master; refusing to stage"
+            exit 1
+          }
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 'lts/*'
           cache: 'npm'
 
+      # This job holds id-token: write, so install scripts do not run here. No
+      # step below needs a native module built by one. If a step fails for lack
+      # of a compiled module, rebuild that module by name here, not in the install.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # The same gates as ci.yml, repeated here because the tagged commit is what
       # ships. `npm test` also builds dist/, which the scan and the upload use.
