@@ -102,8 +102,11 @@ jobs:
           node-version: 'lts/*'
           cache: 'npm'
 
+      # This job holds id-token: write, so install scripts do not run here. No
+      # step below needs a native module built by one. If a step fails for lack
+      # of a compiled module, rebuild that module by name here, not in the install.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # The same gates as ci.yml, repeated here because the tagged commit is what
       # ships. `npm test` also builds dist/, which the scan and the upload use.
