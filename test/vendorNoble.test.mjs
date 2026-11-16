@@ -163,11 +163,14 @@ describe('the vendored code is clean for the scanner and has no runtime dependen
 	});
 });
 
-describe('test fixtures copied from the gateway (branch experimental-pq-v3, bd97c6f)', () => {
+// pgw-v3.json is the gateway's file at release 2026.11.16 (91ae6c1: its capability
+// document lists the CH, LU, DE, FR, AL and XK identifier types); xwing-official.json
+// is still the one from bd97c6f (branch experimental-pq-v3).
+describe('test fixtures copied from the gateway (91ae6c1 and bd97c6f)', () => {
 	it('pgw-v3.json and xwing-official.json are byte-identical to the gateway files', () => {
 		assert.equal(
 			sha256(read('test/fixtures/pgw-v3.json')),
-			'47fcca7969874db0f345f038c477997224659833c4b7f0dc4dc5f2ef40c40853',
+			'a8c6e8ca74d3bf6d9287425f55cb229d585c7c62b92dab5a329cdeaf94651fe9',
 		);
 		assert.equal(
 			sha256(read('test/fixtures/xwing-official.json')),
